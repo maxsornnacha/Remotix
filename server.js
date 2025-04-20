@@ -60,6 +60,10 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('key-down', data);
   });
 
+  socket.on('key-up', (data) => {
+    socket.to(data.roomId).emit('key-up', data);
+  });
+
   socket.on('disconnect', () => {
     console.log('❌ Disconnected:', socket.id);
   });
