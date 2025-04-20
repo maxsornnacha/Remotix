@@ -1,34 +1,20 @@
 {
-  "private": true,
-  "name": "remotix",
-  "description": "Remotix is a sleek, peer-to-peer remote desktop application for secure screen sharing and real-time control between devices.",
+  "name": "api",
   "version": "1.0.0",
-  "author": "Sornnacha Buranapongwattana <sornnacha.bu@gmail.com>",
-  "main": "app/background.js",
+  "main": "index.js",
   "scripts": {
-    "dev": "nextron",
-    "build": "nextron build",
-    "postinstall": "electron-builder install-app-deps"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon server.js"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
   "dependencies": {
-    "@nut-tree-fork/nut-js": "^4.2.6",
-    "@tailwindcss/postcss": "^4.1.4",
-    "electron-serve": "^1.3.0",
-    "electron-store": "^8.2.0",
-    "postcss": "^8.5.3",
-    "robotjs": "^0.6.0",
-    "simple-peer": "^9.11.1",
-    "socket.io-client": "^4.8.1",
-    "tailwindcss": "^4.1.4",
-    "uuid": "^11.1.0"
-  },
-  "devDependencies": {
-    "electron": "^35.2.0",
-    "electron-builder": "^24.13.3",
-    "electron-rebuild": "^3.2.9",
-    "next": "^14.2.4",
-    "nextron": "^9.5.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "nodemon": "^3.1.9",
+    "socket.io": "^4.8.1"
   }
 }
