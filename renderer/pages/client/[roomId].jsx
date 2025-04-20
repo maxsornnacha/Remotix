@@ -12,6 +12,12 @@ export default function ClientPage() {
   const videoRef = useRef(null)
   const peerRef = useRef(null)
 
+  const requestPointerLock = () => {
+    if (videoRef.current) {
+      videoRef.current.requestPointerLock();
+    }
+  };
+
   useEffect(() => {
     if (!roomId) return;
   
@@ -67,7 +73,13 @@ export default function ClientPage() {
   // Send remote input events
   useEffect(() => {
     const handleMouseMove = (e) => {
-      socket.emit('mouse-move', { x: e.clientX, y: e.clientY, roomId })
+      if (document.pointerLockElement === videoRef.current) {
+        socket.emit('mouse-move-relative', {
+          deltaX: e.movementX,
+          deltaY: e.movementY,
+          roomId,
+        });
+      }
     }
 
     const handleClick = (e) => {
@@ -117,6 +129,7 @@ export default function ClientPage() {
             ref={videoRef}
             autoPlay
             className="w-full max-h-[70vh] object-contain"
+            onClick={requestPointerLock}
           />
         </div>
 
