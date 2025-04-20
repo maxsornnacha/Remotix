@@ -1,9 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { useRouter } from 'next/router'
 import Peer from 'simple-peer'
-import { io } from 'socket.io-client'
+import { getSocket } from '../../libs/socket';
 
-const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL);
+const socket = getSocket();
 
 export default function ClientPage() {
   const router = useRouter()
@@ -47,7 +47,9 @@ export default function ClientPage() {
     })
 
     return () => {
-      socket.disconnect()
+      socket.off('connect', handleJoin)
+      socket.off('peer-joined')
+      socket.off('signal')
     }
   }, [roomId])
 
@@ -81,8 +83,6 @@ export default function ClientPage() {
       peerRef.current.destroy()
       peerRef.current = null
     }
-
-    socket.disconnect()
 
     if (videoRef.current?.srcObject) {
       const tracks = videoRef.current.srcObject.getTracks()

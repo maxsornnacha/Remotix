@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/router'
 import Peer from 'simple-peer'
-import { io } from 'socket.io-client'
+import { getSocket } from '../../libs/socket';
 
-const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL);
+const socket = getSocket();
 
 export default function HostPage() {
   const router = useRouter()
@@ -52,7 +52,11 @@ export default function HostPage() {
     })
 
     return () => {
-      socket.disconnect()
+      socket.off('peer-joined');
+      socket.off('signal');
+      socket.off('mouse-move');
+      socket.off('mouse-click');
+      socket.off('key-down');
     }
   }, [roomId, allowControl])
 
@@ -89,7 +93,6 @@ export default function HostPage() {
       peerRef.current = null
     }
 
-    socket.disconnect()
     router.push('/home')
   }
 

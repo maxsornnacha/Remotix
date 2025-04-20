@@ -27,8 +27,9 @@ if (isProd) {
 
   // ✅ Create browser window
   const mainWindow = createWindow('main', {
-    width: 2000,
-    height: 2000,
+    width: 800,
+    height: 800,
+    center: true,
     icon: path.join(__dirname, '..', 'resources', 'icon.icns'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -42,7 +43,7 @@ if (isProd) {
   } else {
     const port = process.argv[2];
     await mainWindow.loadURL(`http://localhost:${port}/home`);
-    // mainWindow.webContents.openDevTools();
+    mainWindow.webContents.openDevTools();
   }
 })();
 

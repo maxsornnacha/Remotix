@@ -1,9 +1,9 @@
 import { useRouter } from 'next/router'
 import { useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
-import { io } from 'socket.io-client'
+import { getSocket } from '../libs/socket';
 
-const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL);
+const socket = getSocket();
 
 export default function HomePage() {
   const [roomId, setRoomId] = useState('')
