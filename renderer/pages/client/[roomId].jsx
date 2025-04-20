@@ -13,45 +13,56 @@ export default function ClientPage() {
   const peerRef = useRef(null)
 
   useEffect(() => {
-    if (!roomId) return
-
-    socket.emit('join-room', roomId)
-
+    if (!roomId) return;
+  
+    const handleJoin = () => {
+      console.log('🟢 Client socket connected. Joining room:', roomId);
+      socket.emit('join-room', roomId);
+    };
+  
+    if (socket.connected) {
+      handleJoin();
+    } else {
+      socket.once('connect', handleJoin);
+    }
+  
     socket.on('peer-joined', () => {
-      // Waiting for host signal
-    })
-
+      console.log('✅ Peer joined');
+      // client doesn't do anything yet here
+    });
+  
     socket.on('signal', ({ from, data }) => {
       if (!peerRef.current) {
         const peer = new Peer({
           initiator: false,
           trickle: false,
-        })
-
+        });
+  
         peer.on('signal', (signalData) => {
-          socket.emit('signal', { to: from, from: socket.id, data: signalData })
-        })
-
+          socket.emit('signal', { to: from, from: socket.id, data: signalData });
+        });
+  
         peer.on('stream', (stream) => {
           if (videoRef.current) {
-            videoRef.current.srcObject = stream
-            videoRef.current.play()
+            videoRef.current.srcObject = stream;
+            videoRef.current.play();
           }
-        })
-
-        peer.signal(data)
-        peerRef.current = peer
+        });
+  
+        peer.signal(data);
+        peerRef.current = peer;
       } else {
-        peerRef.current.signal(data)
+        peerRef.current.signal(data);
       }
-    })
-
+    });
+  
     return () => {
-      socket.off('connect', handleJoin)
-      socket.off('peer-joined')
-      socket.off('signal')
-    }
-  }, [roomId])
+      socket.off('connect', handleJoin);
+      socket.off('peer-joined');
+      socket.off('signal');
+    };
+    }, [roomId]);
+  
 
   // Send remote input events
   useEffect(() => {
