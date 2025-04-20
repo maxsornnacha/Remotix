@@ -58,14 +58,6 @@ ipcMain.on('message', async (event, arg) => {
 
 ipcMain.on('remote-input', async (_event, { type, payload }) => {
   try {
-    // if (type === 'mouse-move') {
-    //   const { x, y } = payload || {};
-    //   if (typeof x === 'number' && typeof y === 'number') {
-    //     await mouse.setPosition({ x, y });
-    //   } else {
-    //     console.warn('🟡 Invalid mouse-move payload:', payload);
-    //   }
-    // }
       if (type === 'mouse-move') {
         const { x, y } = payload || {};
         if (typeof x === 'number' && typeof y === 'number') {
@@ -83,7 +75,27 @@ ipcMain.on('remote-input', async (_event, { type, payload }) => {
       mouse.click(Button.LEFT);
     }
     if (type === 'key-down') {
-      keyboard.type(payload.key);
+      const keyMap = {
+        Enter: Key.Enter,
+        Backspace: Key.Backspace,
+        Tab: Key.Tab,
+        Escape: Key.Escape,
+        ArrowUp: Key.Up,
+        ArrowDown: Key.Down,
+        ArrowLeft: Key.Left,
+        ArrowRight: Key.Right,
+      };
+    
+      const isSpecialKey = keyMap[payload.key];
+    
+      if (isSpecialKey) {
+        await keyboard.pressKey(keyMap[payload.key]);
+        await keyboard.releaseKey(keyMap[payload.key]);
+      } else if (typeof payload.key === 'string') {
+        await keyboard.type(payload.key);
+      } else {
+        console.warn('🔸 Unknown key-down payload:', payload);
+      }
     }
   } catch (err) {
     console.error('Input control error:', err);
