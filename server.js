@@ -31,9 +31,9 @@ io.on('connection', (socket) => {
   console.log('🔌 Connected:', socket.id);
 
   socket.on('check-room', (roomId, callback) => {
-    console.log("all the existing rooms :", io.sockets.adapter.rooms);
+    console.log("all the existing rooms :", activeRooms);
     console.log("join room :", roomId)
-    const exists = io.sockets.adapter.rooms.has(roomId);
+    const exists = activeRooms.has(roomId);
     callback(exists);
   });
 
