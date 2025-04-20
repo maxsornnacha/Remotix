@@ -95,8 +95,8 @@ export default function ClientPage() {
   useEffect(() => {
     const handleMouseMove = (e) => {
       socket.emit('mouse-move', {
-        deltaX: e.movementX,
-        deltaY: e.movementY,
+        x: e.movementX,
+        y: e.movementY,
         roomId,
       });
     };    

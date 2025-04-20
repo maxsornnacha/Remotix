@@ -58,18 +58,27 @@ ipcMain.on('message', async (event, arg) => {
 
 ipcMain.on('remote-input', async (_event, { type, payload }) => {
   try {
-    if (type === 'mouse-move') {
-      const { deltaX, deltaY } = payload || {};
-      if (typeof deltaX === 'number' && typeof deltaY === 'number') {
-        const current = await mouse.getPosition();
-        await mouse.setPosition({
-          x: current.x + deltaX,
-          y: current.y + deltaY,
-        });
-      } else {
-        console.warn('🟡 Invalid mouse-move payload:', payload);
+    // if (type === 'mouse-move') {
+    //   const { x, y } = payload || {};
+    //   if (typeof x === 'number' && typeof y === 'number') {
+    //     await mouse.setPosition({ x, y });
+    //   } else {
+    //     console.warn('🟡 Invalid mouse-move payload:', payload);
+    //   }
+    // }
+      if (type === 'mouse-move') {
+        const { x, y } = payload || {};
+        if (typeof x === 'number' && typeof y === 'number') {
+          const current = await mouse.getPosition();
+          await mouse.setPosition({
+            x: current.x + x,
+            y: current.y + y,
+          });
+        } else {
+          console.warn("current position :", await mouse.getPosition());
+          console.warn('🟡 Invalid mouse-move payload:', payload);
+        }
       }
-    }
     if (type === 'mouse-click') {
       mouse.click(Button.LEFT);
     }
