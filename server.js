@@ -38,6 +38,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join-room', (roomId) => {
+    console.log('join-room :', roomId);
     socket.join(roomId);
     activeRooms.add(roomId);
     socket.to(roomId).emit('peer-joined', socket.id);
@@ -47,7 +48,7 @@ io.on('connection', (socket) => {
     io.to(to).emit('signal', { from, data });
   });
 
-  socket.on('mouse-move', (data) => {
+  socket.on('mouse-move', (data) => {s
     socket.to(data.roomId).emit('mouse-move', data);
   });
 
