@@ -1,0 +1,12 @@
+appId: com.example.nextron
+productName: Remotix
+copyright: Copyright © 2018 Sornnacha Buranapongwattana
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - from: .
+    filter:
+      - package.json
+      - app
+publish: null
