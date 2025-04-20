@@ -10,13 +10,34 @@ export default function ClientPage() {
   const { roomId } = router.query
 
   const videoRef = useRef(null)
-  const peerRef = useRef(null)
 
   const requestPointerLock = () => {
     if (videoRef.current) {
       videoRef.current.requestPointerLock();
     }
   };
+
+  useEffect(() => {
+    const handlePointerLockChange = () => {
+      const isLocked = document.pointerLockElement === videoRef.current;
+      console.log('📌 Pointer Lock Active:', isLocked);
+      document.body.style.cursor = isLocked ? 'none' : 'default';
+    };
+  
+    const handlePointerLockError = () => {
+      console.error('❌ Pointer Lock failed');
+    };
+  
+    document.addEventListener('pointerlockchange', handlePointerLockChange);
+    document.addEventListener('pointerlockerror', handlePointerLockError);
+  
+    return () => {
+      document.removeEventListener('pointerlockchange', handlePointerLockChange);
+      document.removeEventListener('pointerlockerror', handlePointerLockError);
+    };
+  }, []);  
+
+  const peerRef = useRef(null)
 
   useEffect(() => {
     if (!roomId) return;
@@ -73,14 +94,12 @@ export default function ClientPage() {
   // Send remote input events
   useEffect(() => {
     const handleMouseMove = (e) => {
-      if (document.pointerLockElement === videoRef.current) {
-        socket.emit('mouse-move-relative', {
-          deltaX: e.movementX,
-          deltaY: e.movementY,
-          roomId,
-        });
-      }
-    }
+      socket.emit('mouse-move', {
+        deltaX: e.movementX,
+        deltaY: e.movementY,
+        roomId,
+      });
+    };    
 
     const handleClick = (e) => {
       socket.emit('mouse-click', { button: e.button, roomId })
