@@ -94,6 +94,7 @@ export default function ClientPage() {
   // Send remote input events
   useEffect(() => {
     const handleMouseMove = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return;
       socket.emit('mouse-move', {
         x: e.movementX,
         y: e.movementY,
@@ -102,10 +103,12 @@ export default function ClientPage() {
     };    
 
     const handleClick = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return;
       socket.emit('mouse-click', { button: e.button, roomId })
     }
 
     const handleKeyDown = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return;
       socket.emit('key-down', { key: e.key, roomId })
     }
 
