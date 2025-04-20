@@ -48,7 +48,7 @@ io.on('connection', (socket) => {
     io.to(to).emit('signal', { from, data });
   });
 
-  socket.on('mouse-move', (data) => {s
+  socket.on('mouse-move', (data) => {
     socket.to(data.roomId).emit('mouse-move', data);
   });
 
