@@ -47,9 +47,13 @@ export default function HostPage() {
       if (allowControl) window.ipc.sendInput('mouse-click', { button })
     })
 
-    socket.on('key-down', ({ key }) => {
-      if (allowControl) window.ipc.sendInput('key-down', { key })
+    socket.on('key-down', ({ code }) => {
+      if (allowControl) window.ipc.sendInput('key-down', { code })
     })
+    
+    socket.on('key-up', ({ code }) => {
+      if (allowControl) window.ipc.sendInput('key-up', { code });
+    });
 
     return () => {
       socket.off('peer-joined');

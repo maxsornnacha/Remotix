@@ -107,18 +107,25 @@ export default function ClientPage() {
       socket.emit('mouse-click', { button: e.button, roomId })
     }
 
+    const handleKeyUp = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return;
+      socket.emit('key-up', { code: e.code, roomId });
+    };
+
     const handleKeyDown = (e) => {
       if (document.pointerLockElement !== videoRef.current) return;
-      socket.emit('key-down', { key: e.key, roomId })
+      socket.emit('key-down', { code: e.code, roomId })
     }
 
     window.addEventListener('mousemove', handleMouseMove)
     window.addEventListener('click', handleClick)
+    window.addEventListener('keyup', handleKeyUp)
     window.addEventListener('keydown', handleKeyDown)
 
     return () => {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('click', handleClick)
+      window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [])

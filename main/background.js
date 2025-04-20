@@ -75,28 +75,19 @@ ipcMain.on('remote-input', async (_event, { type, payload }) => {
       mouse.click(Button.LEFT);
     }
     if (type === 'key-down') {
-      const keyMap = {
-        Enter: Key.Enter,
-        Backspace: Key.Backspace,
-        Tab: Key.Tab,
-        Escape: Key.Escape,
-        ArrowUp: Key.Up,
-        ArrowDown: Key.Down,
-        ArrowLeft: Key.Left,
-        ArrowRight: Key.Right,
-      };
-    
-      const isSpecialKey = keyMap[payload.key];
-    
-      if (isSpecialKey) {
-        await keyboard.pressKey(keyMap[payload.key]);
-        await keyboard.releaseKey(keyMap[payload.key]);
-      } else if (typeof payload.key === 'string') {
-        await keyboard.type(payload.key);
-      } else {
-        console.warn('🔸 Unknown key-down payload:', payload);
+      const { code } = payload;
+      const key = mapCodeToNutKey(code); // converts code to nut.js Key
+      if (key) {
+        await keyboard.pressKey(key);
       }
     }
+    if (type === 'key-up') {
+      const { code } = payload;
+      const key = mapCodeToNutKey(code);
+      if (key) {
+        await keyboard.releaseKey(key);
+      }
+    }    
   } catch (err) {
     console.error('Input control error:', err);
   }
