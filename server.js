@@ -4,7 +4,6 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const { mouse } = require('@nut-tree-fork/nut-js');
 
 const app = express();
 const server = http.createServer(app);
@@ -51,14 +50,6 @@ io.on('connection', (socket) => {
 
   socket.on('mouse-move', (data) => {
     socket.to(data.roomId).emit('mouse-move', data);
-  });
-
-  socket.on('mouse-move-relative', async ({ deltaX, deltaY }) => {
-    const current = await mouse.getPosition();
-    await mouse.setPosition({
-      x: current.x + deltaX,
-      y: current.y + deltaY,
-    });
   });
 
   socket.on('mouse-click', (data) => {
