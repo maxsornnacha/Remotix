@@ -154,6 +154,13 @@ ipcMain.on('remote-input', async (_event, { type, payload }) => {
         await keyboard.releaseKey(key);
       }
     }    
+    // เพิ่มเติมใน ipcMain.on('remote-input')
+    if (type === 'mouse-down') await mouse.pressButton(Button.LEFT);
+    if (type === 'mouse-up') await mouse.releaseButton(Button.LEFT);
+    if (type === 'mouse-scroll') {
+        const { deltaX, deltaY } = payload;
+        await mouse.scrollVertical(deltaY); // หรือ scrollHorizontal สำหรับแนวนอน
+    }
   } catch (err) {
     console.error('Input control error:', err);
   }
