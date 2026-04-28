@@ -16,6 +16,7 @@
     "express": "^5.1.0",
     "mongoose": "^9.5.0",
     "nodemon": "^3.1.9",
+    "redis": "^5.12.1",
     "socket.io": "^4.8.1"
   }
 }
