@@ -797,6 +797,28 @@ io.on("connection", (socket) => {
     socket.to(data.roomId).emit("mouse-click", data);
   });
 
+  socket.on("mouse-down", (data) => {
+    socket.to(data.roomId).emit("mouse-down", data);
+  });
+
+  socket.on("mouse-up", (data) => {
+    socket.to(data.roomId).emit("mouse-up", data);
+  });
+
+  socket.on("mouse-scroll", (data) => {
+    socket.to(data.roomId).emit("mouse-scroll", data);
+  });
+
+  socket.on("client-network-quality", (data = {}) => {
+    const roomId = String(data.roomId || "").trim();
+    if (!roomId) return;
+    socket.to(roomId).emit("client-network-quality", {
+      level: String(data.level || "good"),
+      rttMs: Number(data.rttMs || 0),
+      roomId,
+    });
+  });
+
   socket.on("key-down", (data) => {
     socket.to(data.roomId).emit("key-down", data);
   });
