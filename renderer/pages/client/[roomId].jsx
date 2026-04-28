@@ -57,6 +57,7 @@ export default function ClientPage() {
   const [dbUnavailableMessage, setDbUnavailableMessage] = useState('')
   const joinedRoomRef = useRef('')
   const pendingSignalsRef = useRef([])
+  const handshakeRetryTimeoutRef = useRef(null)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
@@ -165,6 +166,16 @@ export default function ClientPage() {
     socket.emit('client-handshake-ready', { roomId: targetRoomId }, (response) => {
       if (!response?.ok) {
         setStatus(response?.message || 'Could not mark client handshake ready.', 'error')
+        return
+      }
+      if (response?.pendingHost) {
+        if (handshakeRetryTimeoutRef.current) {
+          window.clearTimeout(handshakeRetryTimeoutRef.current)
+        }
+        handshakeRetryTimeoutRef.current = window.setTimeout(() => {
+          announceClientReady(targetRoomId)
+        }, 1200)
+        setStatus(response?.message || 'Waiting for host readiness...')
         return
       }
       console.log('[client][handshake] client-ready acknowledged', response)
@@ -297,6 +308,9 @@ export default function ClientPage() {
     });
   
     return () => {
+      if (handshakeRetryTimeoutRef.current) {
+        window.clearTimeout(handshakeRetryTimeoutRef.current)
+      }
       socket.off('connect', handleJoin);
       socket.off('peer-joined');
       socket.off('signal');

@@ -238,6 +238,7 @@ export default function HomePage() {
         clientSocketId: toText(request?.clientSocketId),
         clientDeviceId: toText(request?.clientDeviceId),
         clientDisplayName: toText(request?.clientDisplayName),
+        roomId: toText(request?.roomId),
       })
       setFeedback('')
     }
@@ -427,6 +428,15 @@ export default function HomePage() {
     if (!incomingRequest?.clientSocketId) return
     setIsRespondingRequest(true)
     const requestClientSocketId = incomingRequest.clientSocketId
+    const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
+    const safeDeviceId = toText(deviceId) || fallbackDeviceId
+    const approvedRoomIdFromRequest = toText(incomingRequest?.roomId)
+
+    if (approved && safeDeviceId && approvedRoomIdFromRequest) {
+      const encodedName = encodeURIComponent(deviceName || 'Host Device')
+      router.push(`/host/${approvedRoomIdFromRequest}?deviceId=${safeDeviceId}&name=${encodedName}`)
+    }
+
     socket.emit('respond-connection-request', {
       clientSocketId: requestClientSocketId,
       approved,
@@ -437,8 +447,6 @@ export default function HomePage() {
         return
       }
       if (approved && response?.roomId) {
-        const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
-        const safeDeviceId = toText(deviceId) || fallbackDeviceId
         if (safeDeviceId) {
           const encodedName = encodeURIComponent(deviceName || 'Host Device')
           router.push(`/host/${toText(response.roomId)}?deviceId=${safeDeviceId}&name=${encodedName}`)
