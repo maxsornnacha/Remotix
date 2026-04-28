@@ -1,17 +1,12 @@
 import path from "path";
 import fs from "fs";
-const {
-  mouse,
-  keyboard,
-  Button,
-  Key,
-  screen,
-} = require("@nut-tree-fork/nut-js");
+const { mouse, keyboard, Button, Key } = require("@nut-tree-fork/nut-js");
 import { app, ipcMain, session, desktopCapturer } from "electron";
 import serve from "electron-serve";
 import { createWindow } from "./helpers";
 
 const isProd = process.env.NODE_ENV === "production";
+
 const resolveAppIconPath = () => {
   const macCandidates = [
     path.join(__dirname, "..", "resources", "icon.png"),
@@ -24,7 +19,8 @@ const resolveAppIconPath = () => {
     path.join(__dirname, "..", "resources", "icon.icns"),
     path.join(__dirname, "..", "renderer", "public", "images", "logo.png"),
   ];
-  const candidates = process.platform === "darwin" ? macCandidates : defaultCandidates;
+  const candidates =
+    process.platform === "darwin" ? macCandidates : defaultCandidates;
 
   return candidates.find((filePath) => fs.existsSync(filePath)) || undefined;
 };

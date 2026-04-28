@@ -1,5 +1,7 @@
 export const getApiBaseUrl = () => {
-  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL
-  if (process.env.NEXT_PUBLIC_SOCKET_URL) return process.env.NEXT_PUBLIC_SOCKET_URL
-  return 'http://localhost:3001'
-}
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+  // Safe fallback for local dev when env is missing.
+  if (!apiUrl) return "http://localhost:3000";
+  return apiUrl;
+};
