@@ -526,15 +526,23 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("respond-connection-request", ({ clientSocketId, approved }) => {
+  socket.on(
+    "respond-connection-request",
+    ({ clientSocketId, approved }, callback) => {
     if (!ensureDbForSocket()) return;
     if (!clientSocketId) return;
     const store = getStore();
     store
       .getPendingRequest(clientSocketId)
       .then(async (request) => {
-        if (!request) return;
-        if (request.hostSocketId !== socket.id) return;
+        if (!request) {
+          callback?.({ ok: false, message: "Pending request was not found." });
+          return;
+        }
+        if (request.hostSocketId !== socket.id) {
+          callback?.({ ok: false, message: "Request no longer belongs to this host socket." });
+          return;
+        }
         await store.deletePendingRequest(clientSocketId);
 
         if (approved) {
@@ -561,17 +569,20 @@ io.on("connection", (socket) => {
             roomId,
             hostDeviceId: request.hostDeviceId,
           });
+          callback?.({ ok: true, approved: true, roomId, hostDeviceId: request.hostDeviceId });
           return;
         }
 
         io.to(clientSocketId).emit("connection-rejected", {
           message: "Host rejected the connection request.",
         });
+        callback?.({ ok: true, approved: false });
       })
       .catch(() => {
-        // ignore
+        callback?.({ ok: false, message: "Could not respond to connection request." });
       });
-  });
+    },
+  );
 
   socket.on("get-room-host-meta", (roomId, callback) => {
     if (!ensureDbForSocket(callback)) return;
