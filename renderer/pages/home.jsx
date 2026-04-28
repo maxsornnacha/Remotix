@@ -426,17 +426,35 @@ export default function HomePage() {
   const respondIncomingRequest = (approved) => {
     if (!incomingRequest?.clientSocketId) return
     setIsRespondingRequest(true)
+    const requestClientSocketId = incomingRequest.clientSocketId
     socket.emit('respond-connection-request', {
-      clientSocketId: incomingRequest.clientSocketId,
+      clientSocketId: requestClientSocketId,
       approved,
+    }, (response) => {
+      if (!response?.ok) {
+        setFeedbackWithAlert(response?.message || 'Could not process connection request.', 'error')
+        setIsRespondingRequest(false)
+        return
+      }
+      if (approved && response?.roomId) {
+        const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
+        const safeDeviceId = toText(deviceId) || fallbackDeviceId
+        if (safeDeviceId) {
+          const encodedName = encodeURIComponent(deviceName || 'Host Device')
+          router.push(`/host/${toText(response.roomId)}?deviceId=${safeDeviceId}&name=${encodedName}`)
+        }
+      }
+      setIsRespondingRequest(false)
     })
     if (!approved) {
       setFeedbackWithAlert('Connection request rejected.', 'error')
     } else {
       setFeedbackWithAlert('Connection approved. Opening session...', 'success')
     }
-    setIncomingRequest(null)
-    setIsRespondingRequest(false)
+    setIncomingRequest((current) => {
+      if (!current?.clientSocketId) return null
+      return current.clientSocketId === requestClientSocketId ? null : current
+    })
   }
 
   const copyDeviceId = async () => {
