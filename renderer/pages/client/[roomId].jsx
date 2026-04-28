@@ -5,6 +5,7 @@ import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
 import { useAlerts } from '../../libs/alerts'
 import { api } from '../../libs/http'
+import { getRtcConfig } from '../../libs/rtc'
 
 const socket = getSocket();
 
@@ -58,6 +59,7 @@ export default function ClientPage() {
   const joinedRoomRef = useRef('')
   const pendingSignalsRef = useRef([])
   const handshakeRetryTimeoutRef = useRef(null)
+  const streamTimeoutRef = useRef(null)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
@@ -121,6 +123,7 @@ export default function ClientPage() {
     const peer = new Peer({
       initiator,
       trickle: false,
+      config: getRtcConfig(),
     })
 
     peer.on('signal', (signalData) => {
@@ -129,6 +132,10 @@ export default function ClientPage() {
     })
 
     peer.on('stream', (stream) => {
+      if (streamTimeoutRef.current) {
+        window.clearTimeout(streamTimeoutRef.current)
+        streamTimeoutRef.current = null
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         videoRef.current.play()
@@ -152,7 +159,21 @@ export default function ClientPage() {
       setStatus(`Handshake error: ${error?.message || 'Unknown peer error'}`, 'error')
     })
 
+    peer.on('close', () => {
+      setStatus('Peer connection closed. Try reconnecting the session.', 'error')
+      setHasRemoteStream(false)
+    })
+
     peerRef.current = peer
+    if (streamTimeoutRef.current) {
+      window.clearTimeout(streamTimeoutRef.current)
+    }
+    streamTimeoutRef.current = window.setTimeout(() => {
+      if (!videoRef.current?.srcObject) {
+        setStatus('Stream timeout. Host may not be reachable or TURN is required.', 'error')
+      }
+    }, 18000)
+
     if (pendingSignalsRef.current.length > 0) {
       pendingSignalsRef.current.forEach((signalPayload) => {
         peerRef.current?.signal(signalPayload)
@@ -310,6 +331,9 @@ export default function ClientPage() {
     return () => {
       if (handshakeRetryTimeoutRef.current) {
         window.clearTimeout(handshakeRetryTimeoutRef.current)
+      }
+      if (streamTimeoutRef.current) {
+        window.clearTimeout(streamTimeoutRef.current)
       }
       socket.off('connect', handleJoin);
       socket.off('peer-joined');

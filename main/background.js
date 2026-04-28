@@ -1,7 +1,14 @@
 import path from "path";
 import fs from "fs";
 const { mouse, keyboard, Button, Key } = require("@nut-tree-fork/nut-js");
-import { app, ipcMain, session, desktopCapturer } from "electron";
+import {
+  app,
+  ipcMain,
+  session,
+  desktopCapturer,
+  systemPreferences,
+  shell,
+} from "electron";
 import serve from "electron-serve";
 import { createWindow } from "./helpers";
 
@@ -78,6 +85,69 @@ app.setName("Remotix");
 
 app.on("window-all-closed", () => {
   app.quit();
+});
+
+const getPermissionStatus = () => {
+  const isMac = process.platform === "darwin";
+  if (!isMac) {
+    return {
+      platform: process.platform,
+      allGranted: true,
+      requirements: [],
+    };
+  }
+
+  const screen = systemPreferences.getMediaAccessStatus("screen");
+  const accessibilityGranted = systemPreferences.isTrustedAccessibilityClient(
+    false,
+  );
+
+  const requirements = [
+    {
+      key: "screen",
+      label: "Screen Recording",
+      status: screen,
+      granted: screen === "granted",
+    },
+    {
+      key: "accessibility",
+      label: "Accessibility",
+      status: accessibilityGranted ? "granted" : "denied",
+      granted: accessibilityGranted,
+    },
+  ];
+
+  return {
+    platform: process.platform,
+    allGranted: requirements.every((item) => item.granted),
+    requirements,
+  };
+};
+
+ipcMain.handle("permissions:status", () => {
+  return getPermissionStatus();
+});
+
+ipcMain.handle("permissions:request", async (_event, payload = {}) => {
+  const key = payload?.key;
+  if (process.platform !== "darwin") {
+    return getPermissionStatus();
+  }
+
+  if (key === "screen") {
+    await shell.openExternal(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    );
+  }
+
+  if (key === "accessibility") {
+    systemPreferences.isTrustedAccessibilityClient(true);
+    await shell.openExternal(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    );
+  }
+
+  return getPermissionStatus();
 });
 
 ipcMain.on("message", async (event, arg) => {

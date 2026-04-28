@@ -4,6 +4,7 @@ import Peer from 'simple-peer'
 import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
 import { useAlerts } from '../../libs/alerts'
+import { getRtcConfig } from '../../libs/rtc'
 
 const socket = getSocket();
 
@@ -58,6 +59,7 @@ export default function HostPage() {
   const shareStartPromiseRef = useRef(null)
   const hasJoinedRoomRef = useRef(false)
   const hasAnnouncedReadyRef = useRef(false)
+  const peerHealthTimeoutRef = useRef(null)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
 
@@ -84,11 +86,24 @@ export default function HostPage() {
       initiator: true,
       trickle: false,
       stream: localStreamRef.current,
+      config: getRtcConfig(),
     })
 
     peer.on('signal', (data) => {
       console.log('[host][signal] send offer/answer', { to: peerId })
       socket.emit('signal', { to: peerId, from: socket.id, data })
+    })
+
+    peer.on('connect', () => {
+      if (peerHealthTimeoutRef.current) {
+        window.clearTimeout(peerHealthTimeoutRef.current)
+        peerHealthTimeoutRef.current = null
+      }
+      setNotice('Secure peer channel established.', 'success')
+    })
+
+    peer.on('close', () => {
+      setNotice('Peer connection closed. Waiting for reconnect flow...', 'error')
     })
 
     peer.on('error', (error) => {
@@ -98,6 +113,13 @@ export default function HostPage() {
 
     peerRef.current = peer
     pendingPeerIdRef.current = ''
+
+    if (peerHealthTimeoutRef.current) {
+      window.clearTimeout(peerHealthTimeoutRef.current)
+    }
+    peerHealthTimeoutRef.current = window.setTimeout(() => {
+      setNotice('Handshake timeout on host. Check network or TURN settings.', 'error')
+    }, 15000)
   }
 
   const announceHandshakeReady = () => {
@@ -141,6 +163,9 @@ export default function HostPage() {
       console.log('[host][join-room] success', response)
       if (localStreamRef.current) {
         announceHandshakeReady()
+      } else {
+        // Prevent deadlock: client can be ready before host starts share.
+        ensureScreenSharingStarted().catch(() => {})
       }
     })
 
@@ -205,6 +230,9 @@ export default function HostPage() {
     });
 
     return () => {
+      if (peerHealthTimeoutRef.current) {
+        window.clearTimeout(peerHealthTimeoutRef.current)
+      }
       socket.off('start-handshake');
       socket.off('signal');
       socket.off('join-error');

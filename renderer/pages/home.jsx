@@ -79,6 +79,12 @@ export default function HomePage() {
   const [pendingOutboundAddress, setPendingOutboundAddress] = useState('')
   const [isPolicyModalOpen, setIsPolicyModalOpen] = useState(false)
   const [isRegeneratingDeviceId, setIsRegeneratingDeviceId] = useState(false)
+  const [permissionGate, setPermissionGate] = useState({
+    checking: true,
+    allGranted: false,
+    requirements: [],
+    error: '',
+  })
   const outboundRequestTimeoutRef = useRef(null)
   const pendingOutboundAddressRef = useRef('')
   const router = useRouter()
@@ -97,6 +103,44 @@ export default function HomePage() {
     if (!options.silent) {
       notify(text, type)
     }
+  }
+
+  const checkPermissions = async () => {
+    if (typeof window === 'undefined' || !window.ipc?.invoke) {
+      setPermissionGate({
+        checking: false,
+        allGranted: false,
+        requirements: [],
+        error: 'Native permission bridge is not available.',
+      })
+      return
+    }
+    try {
+      const result = await window.ipc.invoke('permissions:status')
+      setPermissionGate({
+        checking: false,
+        allGranted: Boolean(result?.allGranted),
+        requirements: Array.isArray(result?.requirements) ? result.requirements : [],
+        error: '',
+      })
+    } catch (error) {
+      setPermissionGate({
+        checking: false,
+        allGranted: false,
+        requirements: [],
+        error: 'Could not verify required permissions.',
+      })
+    }
+  }
+
+  const requestPermission = async (key) => {
+    if (typeof window === 'undefined' || !window.ipc?.invoke) return
+    try {
+      await window.ipc.invoke('permissions:request', { key })
+    } catch (error) {
+      // Ignore and re-check below to surface latest status.
+    }
+    await checkPermissions()
   }
 
   const clearOutboundRequestTimeout = () => {
@@ -132,6 +176,10 @@ export default function HomePage() {
     } catch (error) {
       setRecentRooms([])
     }
+  }, [])
+
+  useEffect(() => {
+    checkPermissions()
   }, [])
 
   useEffect(() => {
@@ -310,6 +358,10 @@ export default function HomePage() {
   }
 
   const requestConnectionToAddress = (targetAddress) => {
+    if (!permissionGate.allGranted) {
+      setFeedbackWithAlert('Required permissions are not granted yet.', 'error')
+      return
+    }
     if (isServiceLocked) return
     if (!ensurePolicyAccepted()) return
     const targetHostDeviceId = toText(targetAddress).trim()
@@ -425,6 +477,10 @@ export default function HomePage() {
   }
 
   const respondIncomingRequest = (approved) => {
+    if (!permissionGate.allGranted) {
+      setFeedbackWithAlert('Required permissions are not granted yet.', 'error')
+      return
+    }
     if (!incomingRequest?.clientSocketId) return
     setIsRespondingRequest(true)
     const requestClientSocketId = incomingRequest.clientSocketId
@@ -537,12 +593,11 @@ export default function HomePage() {
             >
               <PanelGlyph />
             </button>
-            <span className={`text-xs px-2.5 py-1 rounded-full border ${isServiceLocked
-              ? (isDark ? 'bg-red-700/40 text-red-300 border-red-500/40' : 'bg-red-100 text-red-700 border-red-300')
-              : (isDark ? 'bg-emerald-700/40 text-emerald-300 border-emerald-500/40' : 'bg-emerald-100 text-emerald-700 border-emerald-300')
-            }`}>
-              {isServiceLocked ? 'Service Locked' : 'System Ready'}
-            </span>
+            {isServiceLocked ? (
+              <span className={`text-xs px-2.5 py-1 rounded-full border ${isDark ? 'bg-red-700/40 text-red-300 border-red-500/40' : 'bg-red-100 text-red-700 border-red-300'}`}>
+                Service Unavailable
+              </span>
+            ) : null}
           </div>
         </header>
 
@@ -787,6 +842,77 @@ export default function HomePage() {
 
         </aside>
       </div>
+
+      {!permissionGate.allGranted ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+          <div className={`w-full max-w-2xl rounded-2xl border shadow-2xl overflow-hidden ${isDark ? 'border-slate-600 bg-[#101a2f]' : 'border-slate-300 bg-white'}`}>
+            <div className={`px-5 py-3 border-b flex items-center justify-between ${isDark ? 'border-slate-700 bg-[#0f172a]' : 'border-slate-200 bg-slate-50'}`}>
+              <div>
+                <h3 className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                  Remotix Permissions
+                </h3>
+                <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                  Required before desktop remote control can start
+                </p>
+              </div>
+            </div>
+
+            <div className="px-5 py-4">
+              <p className={`text-sm ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                Please grant all required OS permissions. The app will stay locked until everything below is granted.
+              </p>
+            {permissionGate.error ? (
+              <p className="mt-2 text-sm text-red-500">{toText(permissionGate.error)}</p>
+            ) : null}
+              <div className="mt-4 space-y-2">
+              {permissionGate.checking ? (
+                <p className={`text-sm ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Checking permissions...</p>
+              ) : permissionGate.requirements.length === 0 ? (
+                <p className={`text-sm ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>No permission requirements were reported.</p>
+              ) : (
+                permissionGate.requirements.map((item) => (
+                  <div
+                    key={toText(item?.key)}
+                    className={`rounded-lg border px-3 py-3 flex items-center justify-between ${isDark ? 'border-slate-600 bg-[#0f172a]' : 'border-slate-300 bg-slate-50'}`}
+                  >
+                    <div>
+                      <p className="text-sm font-medium">{toText(item?.label) || toText(item?.key)}</p>
+                      <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Status: {toText(item?.status) || 'unknown'}
+                      </p>
+                    </div>
+                    {item?.granted ? (
+                      <span className="text-xs px-2 py-1 rounded bg-emerald-600 text-white">Granted</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => requestPermission(toText(item?.key))}
+                        className="text-xs px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white"
+                      >
+                        Open Settings
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+              </div>
+            </div>
+
+            <div className={`px-5 py-3 border-t flex items-center justify-between ${isDark ? 'border-slate-700 bg-[#0f172a]/60' : 'border-slate-200 bg-slate-50/80'}`}>
+              <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Tip: After changing macOS permissions, return to app and click recheck.
+              </p>
+              <button
+                type="button"
+                onClick={checkPermissions}
+                className={`px-3 py-2 rounded-md text-sm ${isDark ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300 text-slate-800'}`}
+              >
+                Recheck Permissions
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isPolicyModalOpen ? (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-4 animate-[modalBackdropIn_220ms_ease-out]">
