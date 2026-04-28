@@ -17,6 +17,7 @@ const io = new Server(server, {
 const DEVICE_ONLINE_TTL_MS = 20000;
 const DEVICE_SWEEP_INTERVAL_MS = 5000;
 let runtimeStore = null;
+const roomHandshakeState = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -280,6 +281,52 @@ app.get("/devices/:deviceId/status", async (req, res) => {
 io.on("connection", (socket) => {
   console.log("🔌 Connected:", socket.id);
 
+  const emitHandshakeError = (targetSocketId, message, code = "handshake_error") => {
+    io.to(targetSocketId).emit("handshake-error", {
+      code,
+      message,
+    });
+  };
+
+  const attemptStartHandshake = (roomId, trigger = "unknown") => {
+    if (!roomId) return;
+    const state = roomHandshakeState.get(roomId);
+    if (!state?.hostSocketId || !state.isHostReady) return;
+
+    const roomMembers = Array.from(io.sockets.adapter.rooms.get(roomId) || []);
+    const hostAlive = Boolean(io.sockets.sockets.get(state.hostSocketId));
+    if (!hostAlive) {
+      roomHandshakeState.delete(roomId);
+      return;
+    }
+
+    const readyClientSocketId = roomMembers.find(
+      (memberId) =>
+        memberId !== state.hostSocketId && state.readyClients.has(memberId),
+    );
+    if (!readyClientSocketId) return;
+
+    state.readyClients.delete(readyClientSocketId);
+    io.to(state.hostSocketId).emit("start-handshake", {
+      roomId,
+      peerSocketId: readyClientSocketId,
+      role: "host",
+      initiatedBy: trigger,
+    });
+    io.to(readyClientSocketId).emit("start-handshake", {
+      roomId,
+      peerSocketId: state.hostSocketId,
+      role: "client",
+      initiatedBy: trigger,
+    });
+    console.log("[handshake] started", {
+      roomId,
+      hostSocketId: state.hostSocketId,
+      clientSocketId: readyClientSocketId,
+      trigger,
+    });
+  };
+
   const ensureDbForSocket = (callback) => {
     if (isDbConnected()) return true;
     socket.emit("service-unavailable", {
@@ -330,17 +377,25 @@ io.on("connection", (socket) => {
       .catch(() => callback(false));
   });
 
-  socket.on("join-room", async (payload) => {
+  socket.on("join-room", async (payload, callback) => {
     if (!ensureDbForSocket()) return;
     const store = getStore();
     const isLegacy = typeof payload === "string";
     const roomId = isLegacy ? payload : payload.roomId;
-    if (!roomId) return;
+    if (!roomId) {
+      callback?.({ ok: false, message: "roomId is required." });
+      socket.emit("join-error", { message: "roomId is required." });
+      return;
+    }
 
     if (!isLegacy && payload.role === "client") {
       const allowedRoomId = await store.getApprovedJoin(socket.id);
       if (allowedRoomId !== roomId) {
         socket.emit("join-denied", {
+          message: "Host approval is required before joining this room.",
+        });
+        callback?.({
+          ok: false,
           message: "Host approval is required before joining this room.",
         });
         return;
@@ -365,7 +420,23 @@ io.on("connection", (socket) => {
         payload.deviceId,
         payload.displayName || "Host Device",
       ).catch(() => {});
+
+      roomHandshakeState.set(roomId, {
+        hostSocketId: socket.id,
+        isHostReady: false,
+        readyClients: new Set(),
+      });
     }
+
+    if (!isLegacy && payload.role === "client") {
+      const state = roomHandshakeState.get(roomId);
+      if (state) {
+        state.readyClients.add(socket.id);
+      }
+    }
+
+    socket.data.joinedRoomId = roomId;
+    socket.data.joinedRole = isLegacy ? "legacy" : payload.role || "unknown";
 
     const roomPeers = Array.from(
       io.sockets.adapter.rooms.get(roomId) || [],
@@ -374,6 +445,66 @@ io.on("connection", (socket) => {
       socket.emit("peer-joined", roomPeers[0]);
     }
     socket.to(roomId).emit("peer-joined", socket.id);
+    callback?.({
+      ok: true,
+      roomId,
+      role: socket.data.joinedRole,
+      peers: roomPeers.length,
+    });
+    console.log("[join-room] success", {
+      roomId,
+      socketId: socket.id,
+      role: socket.data.joinedRole,
+      peers: roomPeers.length,
+    });
+  });
+
+  socket.on("host-handshake-ready", ({ roomId }, callback) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) {
+      callback?.({ ok: false, message: "roomId is required." });
+      return;
+    }
+    const state = roomHandshakeState.get(safeRoomId);
+    if (!state || state.hostSocketId !== socket.id) {
+      callback?.({
+        ok: false,
+        message: "Host handshake state is not available for this room.",
+      });
+      emitHandshakeError(
+        socket.id,
+        "Host handshake state is not available for this room.",
+        "host_state_missing",
+      );
+      return;
+    }
+    state.isHostReady = true;
+    callback?.({ ok: true, roomId: safeRoomId });
+    attemptStartHandshake(safeRoomId, "host_ready");
+  });
+
+  socket.on("client-handshake-ready", ({ roomId }, callback) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) {
+      callback?.({ ok: false, message: "roomId is required." });
+      return;
+    }
+    const state = roomHandshakeState.get(safeRoomId);
+    if (!state) {
+      callback?.({
+        ok: false,
+        message: "Room handshake state not found. Wait for host readiness.",
+      });
+      emitHandshakeError(
+        socket.id,
+        "Room handshake state not found. Wait for host readiness.",
+        "room_state_missing",
+      );
+      return;
+    }
+    state.readyClients.add(socket.id);
+    callback?.({ ok: true, roomId: safeRoomId });
+    attemptStartHandshake(safeRoomId, "client_ready");
   });
 
   socket.on("request-connection", async (payload, callback) => {
@@ -673,6 +804,14 @@ io.on("connection", (socket) => {
     const store = getStore();
     Promise.resolve()
       .then(async () => {
+        for (const [roomId, state] of roomHandshakeState.entries()) {
+          if (state.hostSocketId === socket.id) {
+            roomHandshakeState.delete(roomId);
+            continue;
+          }
+          state.readyClients.delete(socket.id);
+        }
+
         await store.deletePendingRequest(socket.id);
         await store.deleteApprovedJoin(socket.id);
 
