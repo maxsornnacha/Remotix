@@ -1,45 +1,78 @@
-import path from 'path';
-const { mouse, keyboard, Button, Key, screen } = require('@nut-tree-fork/nut-js');
-import { app, ipcMain, session, desktopCapturer } from 'electron';
-import serve from 'electron-serve';
-import { createWindow } from './helpers';
+import path from "path";
+import fs from "fs";
+const {
+  mouse,
+  keyboard,
+  Button,
+  Key,
+  screen,
+} = require("@nut-tree-fork/nut-js");
+import { app, ipcMain, session, desktopCapturer } from "electron";
+import serve from "electron-serve";
+import { createWindow } from "./helpers";
 
-const isProd = process.env.NODE_ENV === 'production';
+const isProd = process.env.NODE_ENV === "production";
+const resolveAppIconPath = () => {
+  const macCandidates = [
+    path.join(__dirname, "..", "resources", "icon.png"),
+    path.join(__dirname, "..", "renderer", "public", "images", "logo.png"),
+    path.join(__dirname, "..", "resources", "icon.icns"),
+  ];
+  const defaultCandidates = [
+    path.join(__dirname, "..", "resources", "icon.png"),
+    path.join(__dirname, "..", "resources", "icon.ico"),
+    path.join(__dirname, "..", "resources", "icon.icns"),
+    path.join(__dirname, "..", "renderer", "public", "images", "logo.png"),
+  ];
+  const candidates = process.platform === "darwin" ? macCandidates : defaultCandidates;
+
+  return candidates.find((filePath) => fs.existsSync(filePath)) || undefined;
+};
 
 if (isProd) {
-  serve({ directory: 'app' });
+  serve({ directory: "app" });
 } else {
-  app.setPath('userData', `${app.getPath('userData')} (development)`);
+  app.setPath("userData", `${app.getPath("userData")} (development)`);
 }
+app.setName("Remotix");
 
 (async () => {
   await app.whenReady();
+  const appIconPath = resolveAppIconPath();
+
+  if (process.platform === "darwin" && appIconPath && app.dock) {
+    try {
+      app.dock.setIcon(appIconPath);
+    } catch (error) {
+      console.warn("[icon] Failed to set dock icon:", error.message);
+    }
+  }
 
   // ✅ Electron screen/media permission handler
   session.defaultSession.setDisplayMediaRequestHandler(
     (request, callback) => {
-      desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-        callback({ video: sources[0], audio: 'loopback' });
+      desktopCapturer.getSources({ types: ["screen"] }).then((sources) => {
+        callback({ video: sources[0], audio: "loopback" });
       });
     },
-    { useSystemPicker: true }
+    { useSystemPicker: true },
   );
 
   // ✅ Create browser window
-  const mainWindow = createWindow('main', {
+  const mainWindow = createWindow("main", {
     minWidth: 800,
     minHeight: 800,
     center: true,
-    icon: path.join(__dirname, '..', 'resources', 'icon.icns'),
+    icon: appIconPath,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
-  })
+  });
 
   if (isProd) {
-    await mainWindow.loadURL('app://./home');
+    await mainWindow.loadURL("app://./home");
   } else {
     const port = process.argv[2];
     await mainWindow.loadURL(`http://localhost:${port}/home`);
@@ -47,12 +80,12 @@ if (isProd) {
   }
 })();
 
-app.on('window-all-closed', () => {
+app.on("window-all-closed", () => {
   app.quit();
 });
 
-ipcMain.on('message', async (event, arg) => {
-  event.reply('message', `${arg} World!`);
+ipcMain.on("message", async (event, arg) => {
+  event.reply("message", `${arg} World!`);
 });
 
 function mapCodeToNutKey(code) {
@@ -122,46 +155,46 @@ function mapCodeToNutKey(code) {
   return map[code] || null;
 }
 
-ipcMain.on('remote-input', async (_event, { type, payload }) => {
+ipcMain.on("remote-input", async (_event, { type, payload }) => {
   try {
-      if (type === 'mouse-move') {
-        const { x, y } = payload || {};
-        if (typeof x === 'number' && typeof y === 'number') {
-          const current = await mouse.getPosition();
-          await mouse.setPosition({
-            x: current.x + x,
-            y: current.y + y,
-          });
-        } else {
-          console.warn("current position :", await mouse.getPosition());
-          console.warn('🟡 Invalid mouse-move payload:', payload);
-        }
+    if (type === "mouse-move") {
+      const { x, y } = payload || {};
+      if (typeof x === "number" && typeof y === "number") {
+        const current = await mouse.getPosition();
+        await mouse.setPosition({
+          x: current.x + x,
+          y: current.y + y,
+        });
+      } else {
+        console.warn("current position :", await mouse.getPosition());
+        console.warn("🟡 Invalid mouse-move payload:", payload);
       }
-    if (type === 'mouse-click') {
+    }
+    if (type === "mouse-click") {
       mouse.click(Button.LEFT);
     }
-    if (type === 'key-down') {
+    if (type === "key-down") {
       const { code } = payload;
       const key = mapCodeToNutKey(code); // converts code to nut.js Key
       if (key) {
         await keyboard.pressKey(key);
       }
     }
-    if (type === 'key-up') {
+    if (type === "key-up") {
       const { code } = payload;
       const key = mapCodeToNutKey(code);
       if (key) {
         await keyboard.releaseKey(key);
       }
-    }    
+    }
     // เพิ่มเติมใน ipcMain.on('remote-input')
-    if (type === 'mouse-down') await mouse.pressButton(Button.LEFT);
-    if (type === 'mouse-up') await mouse.releaseButton(Button.LEFT);
-    if (type === 'mouse-scroll') {
-        const { deltaX, deltaY } = payload;
-        await mouse.scrollVertical(deltaY); // หรือ scrollHorizontal สำหรับแนวนอน
+    if (type === "mouse-down") await mouse.pressButton(Button.LEFT);
+    if (type === "mouse-up") await mouse.releaseButton(Button.LEFT);
+    if (type === "mouse-scroll") {
+      const { deltaX, deltaY } = payload;
+      await mouse.scrollVertical(deltaY); // หรือ scrollHorizontal สำหรับแนวนอน
     }
   } catch (err) {
-    console.error('Input control error:', err);
+    console.error("Input control error:", err);
   }
 });

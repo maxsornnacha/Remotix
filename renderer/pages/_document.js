@@ -7,8 +7,7 @@ export default function Document() {
         {/* Example: Google Fonts */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter&display=swap" />
-        <link rel="icon" href="../public/images/logo.png" type="image/x-icon" />
-        <title>Remotix – Remote Desktop App</title>
+        <link rel="icon" href="/images/logo.png" type="image/x-icon" />
       </Head>
       <body>
         <Main />
