@@ -54,6 +54,8 @@ export default function ClientPage() {
   const [hasRemoteStream, setHasRemoteStream] = useState(false)
   const [isSignalingActive, setIsSignalingActive] = useState(false)
   const [isPeerConnected, setIsPeerConnected] = useState(false)
+  const [controlProfile, setControlProfile] = useState('normal')
+  const [latencyMs, setLatencyMs] = useState(null)
   const [sessionEndedReason, setSessionEndedReason] = useState('')
   const [hostMeta, setHostMeta] = useState(null)
   const hostMetaRef = useRef(null)
@@ -66,9 +68,17 @@ export default function ClientPage() {
   const detachRtcDiagnosticsRef = useRef(null)
   const lastRemoteStreamRef = useRef(null)
   const lastNotifiedMessageRef = useRef('')
+  const mouseDeltaRef = useRef({ x: 0, y: 0 })
+  const mouseFrameRef = useRef(null)
+  const pressedKeysRef = useRef(new Set())
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
+  const controlSensitivityMap = {
+    slow: 0.7,
+    normal: 1,
+    fast: 1.35,
+  }
 
   const shouldPushClientNotification = (text, type) => {
     if (!text) return false
@@ -457,52 +467,151 @@ export default function ClientPage() {
 
   // Send remote input events
   useEffect(() => {
+    const activeRoomId = () => approvedRoomId || roomId
+
+    const flushMouseDelta = () => {
+      mouseFrameRef.current = null
+      if (document.pointerLockElement !== videoRef.current) return
+      const room = activeRoomId()
+      if (!room) return
+      const sensitivity = controlSensitivityMap[controlProfile] || 1
+      const dx = Math.round(mouseDeltaRef.current.x * sensitivity)
+      const dy = Math.round(mouseDeltaRef.current.y * sensitivity)
+      mouseDeltaRef.current = { x: 0, y: 0 }
+      if (!dx && !dy) return
+      socket.emit('mouse-move', {
+        x: dx,
+        y: dy,
+        roomId: room,
+      })
+    }
+
+    const scheduleMouseFlush = () => {
+      if (mouseFrameRef.current) return
+      mouseFrameRef.current = window.requestAnimationFrame(flushMouseDelta)
+    }
+
     const handleMouseMove = (e) => {
       if (document.pointerLockElement !== videoRef.current) return;
-      socket.emit('mouse-move', {
-        x: e.movementX,
-        y: e.movementY,
-        roomId: approvedRoomId || roomId,
-      });
-      setLastInputEvent('Mouse move')
-    };    
+      mouseDeltaRef.current.x += e.movementX
+      mouseDeltaRef.current.y += e.movementY
+      scheduleMouseFlush()
+    };
 
     const handleClick = (e) => {
       if (document.pointerLockElement !== videoRef.current) return;
-      socket.emit('mouse-click', { button: e.button, roomId: approvedRoomId || roomId })
+      const room = activeRoomId()
+      if (!room) return
+      socket.emit('mouse-click', { button: e.button, roomId: room })
       setLastInputEvent(`Mouse click (${e.button})`)
+    }
+
+    const handleMouseDown = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return
+      const room = activeRoomId()
+      if (!room) return
+      socket.emit('mouse-down', { button: e.button, roomId: room })
+      setLastInputEvent(`Mouse down (${e.button})`)
+    }
+
+    const handleMouseUp = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return
+      const room = activeRoomId()
+      if (!room) return
+      socket.emit('mouse-up', { button: e.button, roomId: room })
+      setLastInputEvent(`Mouse up (${e.button})`)
+    }
+
+    const handleWheel = (e) => {
+      if (document.pointerLockElement !== videoRef.current) return
+      const room = activeRoomId()
+      if (!room) return
+      socket.emit('mouse-scroll', {
+        deltaX: e.deltaX,
+        deltaY: e.deltaY,
+        roomId: room,
+      })
+      setLastInputEvent('Mouse scroll')
     }
 
     const handleKeyUp = (e) => {
       if (document.pointerLockElement !== videoRef.current) return;
-      socket.emit('key-up', { code: e.code, roomId: approvedRoomId || roomId });
+      const room = activeRoomId()
+      if (!room) return
+      pressedKeysRef.current.delete(e.code)
+      socket.emit('key-up', { code: e.code, roomId: room });
       setLastInputEvent(`Key up (${e.code})`)
     };
 
     const handleKeyDown = (e) => {
       if (document.pointerLockElement !== videoRef.current) return;
-      socket.emit('key-down', { code: e.code, roomId: approvedRoomId || roomId })
+      const room = activeRoomId()
+      if (!room) return
+      if (pressedKeysRef.current.has(e.code)) return
+      pressedKeysRef.current.add(e.code)
+      socket.emit('key-down', { code: e.code, roomId: room })
       setLastInputEvent(`Key down (${e.code})`)
     }
 
     window.addEventListener('mousemove', handleMouseMove)
     window.addEventListener('click', handleClick)
+    window.addEventListener('mousedown', handleMouseDown)
+    window.addEventListener('mouseup', handleMouseUp)
+    window.addEventListener('wheel', handleWheel, { passive: true })
     window.addEventListener('keyup', handleKeyUp)
     window.addEventListener('keydown', handleKeyDown)
 
     return () => {
+      if (mouseFrameRef.current) {
+        window.cancelAnimationFrame(mouseFrameRef.current)
+        mouseFrameRef.current = null
+      }
+      mouseDeltaRef.current = { x: 0, y: 0 }
+      pressedKeysRef.current.clear()
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('click', handleClick)
+      window.removeEventListener('mousedown', handleMouseDown)
+      window.removeEventListener('mouseup', handleMouseUp)
+      window.removeEventListener('wheel', handleWheel)
       window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [roomId, approvedRoomId])
+  }, [roomId, approvedRoomId, controlProfile])
 
   useEffect(() => {
     if (!hasRemoteStream) return
     if (!videoRef.current || !lastRemoteStreamRef.current) return
     void attachRemoteStream(lastRemoteStreamRef.current)
   }, [hasRemoteStream])
+
+  useEffect(() => {
+    const room = toText(approvedRoomId || roomId)
+    if (!room) return
+
+    const detectConnectionLevel = async () => {
+      const pc = peerRef.current?._pc
+      if (!pc || typeof pc.getStats !== 'function') return
+      try {
+        const stats = await pc.getStats()
+        const entries = Array.from(stats.values())
+        const candidatePairs = entries.filter((entry) => entry.type === 'candidate-pair')
+        const selected =
+          candidatePairs.find((pair) => pair.nominated && pair.state === 'succeeded') ||
+          candidatePairs.find((pair) => pair.selected)
+        const rttSeconds = Number(selected?.currentRoundTripTime || 0)
+        if (!rttSeconds) return
+        const rttMs = rttSeconds * 1000
+        const level = rttMs > 240 ? 'poor' : rttMs > 130 ? 'fair' : 'good'
+        setLatencyMs(Math.round(rttMs))
+        socket.emit('client-network-quality', { roomId: room, level, rttMs })
+      } catch (_error) {
+        // Ignore stats error and retry next interval.
+      }
+    }
+
+    const timer = window.setInterval(detectConnectionLevel, 4000)
+    return () => window.clearInterval(timer)
+  }, [approvedRoomId, roomId, isPeerConnected, hasRemoteStream])
 
   const handleDisconnect = () => {
     socket.emit('leave-session', {
@@ -530,6 +639,7 @@ export default function ClientPage() {
     setHasRemoteStream(false)
     setIsPeerConnected(false)
     setIsSignalingActive(false)
+    setLatencyMs(null)
 
     router.push('/home')
   }
@@ -588,6 +698,11 @@ export default function ClientPage() {
             }`}>
               {isPointerLocked ? 'Control On' : canControlSession ? 'Approved' : 'Pending'}
             </span>
+            {typeof latencyMs === 'number' ? (
+              <span className={`${isDark ? 'text-slate-400' : 'text-slate-500'} text-[11px]`}>
+                {latencyMs} ms
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -646,6 +761,18 @@ export default function ClientPage() {
                   >
                     Reconnect
                   </button>
+                  <label className="col-span-2 text-xs text-left">
+                    <span className={`${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Control sensitivity</span>
+                    <select
+                      value={controlProfile}
+                      onChange={(event) => setControlProfile(event.target.value)}
+                      className={`mt-1 w-full rounded-md border px-2 py-2 text-sm ${isDark ? 'border-slate-600 bg-[#2a3040] text-slate-100' : 'border-slate-300 bg-white text-slate-800'}`}
+                    >
+                      <option value="slow">Slow</option>
+                      <option value="normal">Normal</option>
+                      <option value="fast">Fast</option>
+                    </select>
+                  </label>
                   <button
                     onClick={handleDisconnect}
                     className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-red-700 hover:bg-red-600 text-white"

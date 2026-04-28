@@ -15,6 +15,39 @@ import { createWindow } from "./helpers";
 
 const isProd = process.env.NODE_ENV === "production";
 let preferredScreenSourceId = "";
+let mouseDeltaBuffer = { x: 0, y: 0 };
+let mouseFlushTimer = null;
+
+const buttonFromIndex = (index) => {
+  if (index === 1) return Button.MIDDLE;
+  if (index === 2) return Button.RIGHT;
+  return Button.LEFT;
+};
+
+const flushMouseDelta = async () => {
+  if (!mouseDeltaBuffer.x && !mouseDeltaBuffer.y) return;
+  const delta = { ...mouseDeltaBuffer };
+  mouseDeltaBuffer = { x: 0, y: 0 };
+  try {
+    const current = await mouse.getPosition();
+    await mouse.setPosition({
+      x: current.x + delta.x,
+      y: current.y + delta.y,
+    });
+  } catch (error) {
+    console.error("Mouse flush error:", error);
+  }
+};
+
+const queueMouseDelta = (x, y) => {
+  mouseDeltaBuffer.x += x;
+  mouseDeltaBuffer.y += y;
+  if (mouseFlushTimer) return;
+  mouseFlushTimer = setTimeout(async () => {
+    mouseFlushTimer = null;
+    await flushMouseDelta();
+  }, 8);
+};
 
 if (process.platform === "darwin") {
   // Workaround for known macOS window capture black-frame regressions.
@@ -297,18 +330,15 @@ ipcMain.on("remote-input", async (_event, { type, payload }) => {
     if (type === "mouse-move") {
       const { x, y } = payload || {};
       if (typeof x === "number" && typeof y === "number") {
-        const current = await mouse.getPosition();
-        await mouse.setPosition({
-          x: current.x + x,
-          y: current.y + y,
-        });
+        queueMouseDelta(x, y);
       } else {
         console.warn("current position :", await mouse.getPosition());
         console.warn("🟡 Invalid mouse-move payload:", payload);
       }
     }
     if (type === "mouse-click") {
-      mouse.click(Button.LEFT);
+      const button = buttonFromIndex(Number(payload?.button ?? 0));
+      await mouse.click(button);
     }
     if (type === "key-down") {
       const { code } = payload;
@@ -325,8 +355,14 @@ ipcMain.on("remote-input", async (_event, { type, payload }) => {
       }
     }
     // เพิ่มเติมใน ipcMain.on('remote-input')
-    if (type === "mouse-down") await mouse.pressButton(Button.LEFT);
-    if (type === "mouse-up") await mouse.releaseButton(Button.LEFT);
+    if (type === "mouse-down") {
+      const button = buttonFromIndex(Number(payload?.button ?? 0));
+      await mouse.pressButton(button);
+    }
+    if (type === "mouse-up") {
+      const button = buttonFromIndex(Number(payload?.button ?? 0));
+      await mouse.releaseButton(button);
+    }
     if (type === "mouse-scroll") {
       const { deltaX, deltaY } = payload;
       await mouse.scrollVertical(deltaY); // หรือ scrollHorizontal สำหรับแนวนอน

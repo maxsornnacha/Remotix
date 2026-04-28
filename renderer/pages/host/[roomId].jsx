@@ -59,6 +59,7 @@ export default function HostPage() {
   const [sessionEndedReason, setSessionEndedReason] = useState('')
   const [isSignalingActive, setIsSignalingActive] = useState(false)
   const [isPeerConnected, setIsPeerConnected] = useState(false)
+  const [latencyMs, setLatencyMs] = useState(null)
   const videoRef = useRef(null)
   const localStreamRef = useRef(null)
   const blackFrameCanvasRef = useRef(null)
@@ -75,6 +76,7 @@ export default function HostPage() {
   const blackRecoveryInFlightRef = useRef(false)
   const lastNotifiedMessageRef = useRef('')
   const isManualDisconnectRef = useRef(false)
+  const appliedQualityLevelRef = useRef('')
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const logDebug = (stage, payload = {}) => {
@@ -197,6 +199,32 @@ export default function HostPage() {
       })
       setNotice('Preview is not showing. Please choose a screen again.', 'error')
       return false
+    }
+  }
+
+  const applyStreamQualityProfile = async (level = 'good') => {
+    const stream = localStreamRef.current
+    const track = stream?.getVideoTracks?.()[0]
+    if (!track || typeof track.applyConstraints !== 'function') return
+
+    const profileMap = {
+      good: { width: 1920, height: 1080, frameRate: 30 },
+      fair: { width: 1280, height: 720, frameRate: 24 },
+      poor: { width: 960, height: 540, frameRate: 15 },
+    }
+    const target = profileMap[level] || profileMap.good
+    if (appliedQualityLevelRef.current === level) return
+
+    try {
+      await track.applyConstraints({
+        width: { ideal: target.width, max: target.width },
+        height: { ideal: target.height, max: target.height },
+        frameRate: { ideal: target.frameRate, max: target.frameRate },
+      })
+      appliedQualityLevelRef.current = level
+      setSessionNotice(`Connection quality: ${level}. Stream optimized automatically.`)
+    } catch (error) {
+      console.warn('[host][quality] applyConstraints failed', error)
     }
   }
 
@@ -523,6 +551,13 @@ export default function HostPage() {
       showSessionEnded(payload?.message || 'Client ended the session.')
     })
 
+    socket.on('client-network-quality', ({ level, rttMs }) => {
+      applyStreamQualityProfile(level).catch(() => {})
+      if (typeof rttMs === 'number' && rttMs > 0) {
+        setLatencyMs(Math.round(rttMs))
+      }
+    })
+
     // Step 2: Listen for remote control events
     socket.on('mouse-move', ({ x, y }) => {
       if (allowControl) window.ipc.sendInput('mouse-move', { x, y })
@@ -530,6 +565,18 @@ export default function HostPage() {
 
     socket.on('mouse-click', ({ button }) => {
       if (allowControl) window.ipc.sendInput('mouse-click', { button })
+    })
+
+    socket.on('mouse-down', ({ button }) => {
+      if (allowControl) window.ipc.sendInput('mouse-down', { button })
+    })
+
+    socket.on('mouse-up', ({ button }) => {
+      if (allowControl) window.ipc.sendInput('mouse-up', { button })
+    })
+
+    socket.on('mouse-scroll', ({ deltaX, deltaY }) => {
+      if (allowControl) window.ipc.sendInput('mouse-scroll', { deltaX, deltaY })
     })
 
     socket.on('key-down', ({ code }) => {
@@ -550,11 +597,15 @@ export default function HostPage() {
       socket.off('handshake-error');
       socket.off('mouse-move');
       socket.off('mouse-click');
+      socket.off('mouse-down');
+      socket.off('mouse-up');
+      socket.off('mouse-scroll');
       socket.off('key-down');
       socket.off('key-up');
       socket.off('incoming-connection-request');
       socket.off('service-unavailable');
       socket.off('session-ended');
+      socket.off('client-network-quality');
     }
   }, [roomId, allowControl, router])
 
@@ -672,6 +723,8 @@ export default function HostPage() {
         }
 
         localStreamRef.current = stream
+        appliedQualityLevelRef.current = ''
+        await applyStreamQualityProfile('good')
         const track = stream.getVideoTracks()[0]
         const settings = track?.getSettings?.() || {}
         console.log('[host][screen-share] selected-source', {
@@ -784,6 +837,7 @@ export default function HostPage() {
     }
     setIsPeerConnected(false)
     setIsSignalingActive(false)
+    setLatencyMs(null)
 
     router.push('/home')
   }
@@ -871,6 +925,11 @@ export default function HostPage() {
             }`}>
               {isSharing ? 'Online' : isPreparingShare ? 'Preparing' : 'Idle'}
             </span>
+            {typeof latencyMs === 'number' ? (
+              <span className={`${isDark ? 'text-slate-400' : 'text-slate-500'} text-[11px]`}>
+                {latencyMs} ms
+              </span>
+            ) : null}
           </div>
         </div>
 
