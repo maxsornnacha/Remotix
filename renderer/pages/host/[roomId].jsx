@@ -56,6 +56,8 @@ export default function HostPage() {
   const peerRef = useRef(null)
   const pendingPeerIdRef = useRef('')
   const shareStartPromiseRef = useRef(null)
+  const hasJoinedRoomRef = useRef(false)
+  const hasAnnouncedReadyRef = useRef(false)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
 
@@ -85,11 +87,32 @@ export default function HostPage() {
     })
 
     peer.on('signal', (data) => {
+      console.log('[host][signal] send offer/answer', { to: peerId })
       socket.emit('signal', { to: peerId, from: socket.id, data })
+    })
+
+    peer.on('error', (error) => {
+      console.error('[host][peer] error', error)
+      setNotice(`Handshake error: ${error?.message || 'Unknown peer error'}`, 'error')
     })
 
     peerRef.current = peer
     pendingPeerIdRef.current = ''
+  }
+
+  const announceHandshakeReady = () => {
+    if (!roomId || !hasJoinedRoomRef.current || !localStreamRef.current) return
+    if (hasAnnouncedReadyRef.current) return
+    hasAnnouncedReadyRef.current = true
+    socket.emit('host-handshake-ready', { roomId }, (response) => {
+      if (!response?.ok) {
+        hasAnnouncedReadyRef.current = false
+        setNotice(response?.message || 'Could not mark host handshake ready.', 'error')
+        return
+      }
+      console.log('[host][handshake] host-ready acknowledged', { roomId })
+      setNotice('Host is ready. Waiting for client handshake...', 'info')
+    })
   }
 
   // Step 1: Join room & signaling
@@ -109,21 +132,46 @@ export default function HostPage() {
       role: 'host',
       deviceId: deviceId || '',
       displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Host Device',
+    }, (response) => {
+      if (!response?.ok) {
+        setNotice(response?.message || 'Could not join host room.', 'error')
+        return
+      }
+      hasJoinedRoomRef.current = true
+      console.log('[host][join-room] success', response)
+      if (localStreamRef.current) {
+        announceHandshakeReady()
+      }
     })
 
-    socket.on('peer-joined', (peerId) => {
+    socket.on('start-handshake', (payload) => {
+      const peerId = toText(payload?.peerSocketId)
+      if (!peerId) {
+        setNotice('Handshake failed: missing peer identity.', 'error')
+        return
+      }
+      console.log('[host][handshake] start-handshake received', payload)
       if (!localStreamRef.current) {
         pendingPeerIdRef.current = peerId
-        setNotice('Connection approved, but screen sharing is not ready yet.')
+        setNotice('Client joined. Preparing screen share for handshake...')
         ensureScreenSharingStarted().catch(() => {})
         return
       }
-      setNotice('Client connected. Enable remote control only for trusted users.')
       createPeerConnection(peerId)
+      setNotice('Handshake started. Exchanging secure signaling...', 'info')
     })
 
     socket.on('signal', ({ from, data }) => {
+      console.log('[host][signal] received', { from })
       peerRef.current?.signal(data)
+    })
+
+    socket.on('join-error', (payload) => {
+      setNotice(payload?.message || 'Could not join host room.', 'error')
+    })
+
+    socket.on('handshake-error', (payload) => {
+      setNotice(payload?.message || 'Handshake error on host side.', 'error')
     })
 
     socket.on('incoming-connection-request', (request) => {
@@ -157,8 +205,10 @@ export default function HostPage() {
     });
 
     return () => {
-      socket.off('peer-joined');
+      socket.off('start-handshake');
       socket.off('signal');
+      socket.off('join-error');
+      socket.off('handshake-error');
       socket.off('mouse-move');
       socket.off('mouse-click');
       socket.off('key-down');
@@ -216,6 +266,7 @@ export default function HostPage() {
           videoRef.current.play()
         }
         setIsSharing(true)
+        announceHandshakeReady()
         if (pendingPeerIdRef.current) {
           createPeerConnection(pendingPeerIdRef.current)
           setNotice('Client connected. Secure stream is now live.', 'success')
@@ -282,7 +333,15 @@ export default function HostPage() {
       }
     }
 
-    socket.emit('respond-connection-request', { clientSocketId, approved })
+    socket.emit('respond-connection-request', { clientSocketId, approved }, (response) => {
+      if (!response?.ok) {
+        setNotice(response?.message || 'Could not process connection request.', 'error')
+        return
+      }
+      if (approved && response?.roomId) {
+        console.log('[host][request] approved', response)
+      }
+    })
     setIncomingRequests((prev) => prev.filter((item) => item.clientSocketId !== clientSocketId))
     setNotice(approved ? 'Connection approved. Client can now join securely.' : 'Connection rejected.', approved ? 'success' : 'error')
   }

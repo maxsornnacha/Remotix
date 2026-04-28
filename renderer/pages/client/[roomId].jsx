@@ -55,6 +55,8 @@ export default function ClientPage() {
   const hostMetaRef = useRef(null)
   const [approvedRoomId, setApprovedRoomId] = useState('')
   const [dbUnavailableMessage, setDbUnavailableMessage] = useState('')
+  const joinedRoomRef = useRef('')
+  const pendingSignalsRef = useRef([])
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
@@ -108,6 +110,68 @@ export default function ClientPage() {
 
   const peerRef = useRef(null)
 
+  const createPeerConnection = (peerSocketId, initiator = false) => {
+    if (!peerSocketId) return
+    if (peerRef.current) {
+      peerRef.current.destroy()
+      peerRef.current = null
+    }
+
+    const peer = new Peer({
+      initiator,
+      trickle: false,
+    })
+
+    peer.on('signal', (signalData) => {
+      console.log('[client][signal] send', { to: peerSocketId, initiator })
+      socket.emit('signal', { to: peerSocketId, from: socket.id, data: signalData })
+    })
+
+    peer.on('stream', (stream) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        videoRef.current.play()
+        setStatus('Live stream ready. Click on video to control.', 'success')
+        setHasRemoteStream(true)
+      }
+
+      if (hostMetaRef.current?.hostDeviceId && deviceId) {
+        api.post('/pairings/save', {
+          ownerDeviceId: deviceId,
+          ownerLabel: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
+          peerDeviceId: hostMetaRef.current.hostDeviceId,
+          peerLabel: hostMetaRef.current.hostDisplayName || 'Host Device',
+          roomId: approvedRoomId || roomId,
+        }).catch(() => {})
+      }
+    })
+
+    peer.on('error', (error) => {
+      console.error('[client][peer] error', error)
+      setStatus(`Handshake error: ${error?.message || 'Unknown peer error'}`, 'error')
+    })
+
+    peerRef.current = peer
+    if (pendingSignalsRef.current.length > 0) {
+      pendingSignalsRef.current.forEach((signalPayload) => {
+        peerRef.current?.signal(signalPayload)
+      })
+      pendingSignalsRef.current = []
+    }
+  }
+
+  const announceClientReady = (targetRoomId) => {
+    if (!targetRoomId) return
+    socket.emit('client-handshake-ready', { roomId: targetRoomId }, (response) => {
+      if (!response?.ok) {
+        setStatus(response?.message || 'Could not mark client handshake ready.', 'error')
+        return
+      }
+      console.log('[client][handshake] client-ready acknowledged', response)
+      setStatus('Joined room. Waiting for host handshake start...')
+    })
+  }
+
   useEffect(() => {
     if (!roomId) return;
 
@@ -119,17 +183,29 @@ export default function ClientPage() {
       }
     }
   
+    const joinClientRoom = (targetRoomId) => {
+      socket.emit('join-room', {
+        roomId: targetRoomId,
+        role: 'client',
+        deviceId: deviceId || '',
+        displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
+      }, (response) => {
+        if (!response?.ok) {
+          setStatus(response?.message || 'Could not join room.', 'error')
+          return
+        }
+        joinedRoomRef.current = targetRoomId
+        console.log('[client][join-room] success', response)
+        announceClientReady(targetRoomId)
+      })
+    }
+
     const handleJoin = () => {
       const isPreapproved = preapproved === '1'
       if (isPreapproved) {
         setApprovedRoomId(roomId)
         setStatus('Joining approved session...')
-        socket.emit('join-room', {
-          roomId,
-          role: 'client',
-          deviceId: deviceId || '',
-          displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
-        })
+        joinClientRoom(roomId)
         return
       }
 
@@ -174,12 +250,7 @@ export default function ClientPage() {
       const acceptedRoomId = payload?.roomId || roomId
       setApprovedRoomId(acceptedRoomId)
       setStatus('Host approved. Joining secure session...', 'success')
-      socket.emit('join-room', {
-        roomId: acceptedRoomId,
-        role: 'client',
-        deviceId: deviceId || '',
-        displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
-      })
+      joinClientRoom(acceptedRoomId)
     })
 
     socket.on('connection-rejected', (payload) => {
@@ -195,42 +266,34 @@ export default function ClientPage() {
       setDbMessage(message)
       setStatus(message, 'error')
     })
+
+    socket.on('join-error', (payload) => {
+      setStatus(payload?.message || 'Could not join room.', 'error')
+    })
+
+    socket.on('handshake-error', (payload) => {
+      setStatus(payload?.message || 'Handshake error on client side.', 'error')
+    })
+
+    socket.on('start-handshake', (payload) => {
+      const peerSocketId = toText(payload?.peerSocketId)
+      if (!peerSocketId) {
+        setStatus('Handshake failed: missing peer identity.', 'error')
+        return
+      }
+      console.log('[client][handshake] start-handshake received', payload)
+      createPeerConnection(peerSocketId, false)
+      setStatus('Handshake started. Waiting for remote stream...')
+    })
   
     socket.on('signal', ({ from, data }) => {
+      console.log('[client][signal] received', { from })
       if (!peerRef.current) {
-        const peer = new Peer({
-          initiator: false,
-          trickle: false,
-        });
-  
-        peer.on('signal', (signalData) => {
-          socket.emit('signal', { to: from, from: socket.id, data: signalData });
-        });
-  
-        peer.on('stream', (stream) => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.play();
-            setStatus('Live stream ready. Click on video to control.', 'success')
-            setHasRemoteStream(true)
-          }
-
-          if (hostMetaRef.current?.hostDeviceId && deviceId) {
-            api.post('/pairings/save', {
-                ownerDeviceId: deviceId,
-                ownerLabel: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
-                peerDeviceId: hostMetaRef.current.hostDeviceId,
-                peerLabel: hostMetaRef.current.hostDisplayName || 'Host Device',
-                roomId,
-              }).catch(() => {})
-          }
-        });
-  
-        peer.signal(data);
-        peerRef.current = peer;
-      } else {
-        peerRef.current.signal(data);
+        pendingSignalsRef.current.push(data)
+        setStatus('Signaling received before handshake start. Waiting for handshake...')
+        return
       }
+      peerRef.current.signal(data)
     });
   
     return () => {
@@ -241,6 +304,9 @@ export default function ClientPage() {
       socket.off('connection-rejected');
       socket.off('join-denied');
       socket.off('service-unavailable');
+      socket.off('join-error');
+      socket.off('handshake-error');
+      socket.off('start-handshake');
     };
     }, [roomId, router, deviceId, name, targetHostDeviceId, preapproved]);
   
