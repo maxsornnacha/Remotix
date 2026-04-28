@@ -54,6 +54,7 @@ export default function HostPage() {
   const videoRef = useRef(null)
   const localStreamRef = useRef(null)
   const peerRef = useRef(null)
+  const pendingPeerIdRef = useRef('')
   const shareStartPromiseRef = useRef(null)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
@@ -68,6 +69,27 @@ export default function HostPage() {
     const text = toText(message)
     setDbUnavailableMessage(text)
     if (text) pushAlert(text, { type: 'error' })
+  }
+
+  const createPeerConnection = (peerId) => {
+    if (!peerId || !localStreamRef.current) return
+    if (peerRef.current) {
+      peerRef.current.destroy()
+      peerRef.current = null
+    }
+
+    const peer = new Peer({
+      initiator: true,
+      trickle: false,
+      stream: localStreamRef.current,
+    })
+
+    peer.on('signal', (data) => {
+      socket.emit('signal', { to: peerId, from: socket.id, data })
+    })
+
+    peerRef.current = peer
+    pendingPeerIdRef.current = ''
   }
 
   // Step 1: Join room & signaling
@@ -91,21 +113,13 @@ export default function HostPage() {
 
     socket.on('peer-joined', (peerId) => {
       if (!localStreamRef.current) {
+        pendingPeerIdRef.current = peerId
         setNotice('Connection approved, but screen sharing is not ready yet.')
+        ensureScreenSharingStarted().catch(() => {})
         return
       }
       setNotice('Client connected. Enable remote control only for trusted users.')
-      const peer = new Peer({
-        initiator: true,
-        trickle: false,
-        stream: localStreamRef.current,
-      })
-
-      peer.on('signal', (data) => {
-        socket.emit('signal', { to: peerId, from: socket.id, data })
-      })
-
-      peerRef.current = peer
+      createPeerConnection(peerId)
     })
 
     socket.on('signal', ({ from, data }) => {
@@ -202,7 +216,12 @@ export default function HostPage() {
           videoRef.current.play()
         }
         setIsSharing(true)
-        setNotice('Screen sharing started. Waiting for approved client to connect.', 'success')
+        if (pendingPeerIdRef.current) {
+          createPeerConnection(pendingPeerIdRef.current)
+          setNotice('Client connected. Secure stream is now live.', 'success')
+        } else {
+          setNotice('Screen sharing started. Waiting for approved client to connect.', 'success')
+        }
         return true
       } catch (error) {
         console.error('Screen share error:', error)

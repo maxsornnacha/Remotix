@@ -244,19 +244,23 @@ export default function HomePage() {
 
     const onHostConnectionApproved = (payload) => {
       const roomIdForHost = toText(payload?.roomId)
-      if (!roomIdForHost || !deviceId) return
+      const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
+      const safeDeviceId = toText(deviceId) || fallbackDeviceId
+      if (!roomIdForHost || !safeDeviceId) return
       const encodedName = encodeURIComponent(deviceName || 'Host Device')
-      router.push(`/host/${roomIdForHost}?deviceId=${deviceId}&name=${encodedName}`)
+      router.push(`/host/${roomIdForHost}?deviceId=${safeDeviceId}&name=${encodedName}`)
     }
 
     const onConnectionApproved = (payload) => {
       const approvedRoomId = toText(payload?.roomId)
       const hostDeviceId = toText(payload?.hostDeviceId) || toText(pendingOutboundAddressRef.current)
-      if (!approvedRoomId || !deviceId) return
+      const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
+      const safeDeviceId = toText(deviceId) || fallbackDeviceId
+      if (!approvedRoomId || !safeDeviceId) return
       rememberRoom(hostDeviceId)
       resetOutboundRequestState()
       const encodedName = encodeURIComponent(deviceName || 'Client Device')
-      router.push(`/client/${approvedRoomId}?deviceId=${deviceId}&name=${encodedName}&targetHostDeviceId=${hostDeviceId}&preapproved=1`)
+      router.push(`/client/${approvedRoomId}?deviceId=${safeDeviceId}&name=${encodedName}&targetHostDeviceId=${hostDeviceId}&preapproved=1`)
     }
 
     const onConnectionRejected = (payload) => {

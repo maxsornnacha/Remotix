@@ -10,3 +10,13 @@ files:
       - package.json
       - app
 publish: null
+
+mac:
+  target:
+    - dmg
+  icon: resources/icon.icns
+
+win:
+  target:
+    - nsis
+  icon: resources/icon.ico
