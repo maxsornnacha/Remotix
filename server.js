@@ -805,7 +805,36 @@ io.on("connection", (socket) => {
     socket.to(data.roomId).emit("key-up", data);
   });
 
+  socket.on("leave-session", ({ roomId, message } = {}) => {
+    const safeRoomId = String(roomId || socket.data.joinedRoomId || "").trim();
+    if (!safeRoomId) return;
+
+    socket.to(safeRoomId).emit("session-ended", {
+      message: String(message || "The other participant ended the session."),
+    });
+    socket.leave(safeRoomId);
+
+    if (socket.data.joinedRoomId === safeRoomId) {
+      socket.data.joinedRoomId = "";
+    }
+
+    const state = roomHandshakeState.get(safeRoomId);
+    if (state) {
+      if (state.hostSocketId === socket.id) {
+        roomHandshakeState.delete(safeRoomId);
+      } else {
+        state.readyClients.delete(socket.id);
+      }
+    }
+  });
+
   socket.on("disconnect", () => {
+    const disconnectedRoomId = String(socket.data.joinedRoomId || "").trim();
+    if (disconnectedRoomId) {
+      socket.to(disconnectedRoomId).emit("session-ended", {
+        message: "The other participant disconnected.",
+      });
+    }
     const store = getStore();
     Promise.resolve()
       .then(async () => {
