@@ -5,7 +5,7 @@ import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
 import { useAlerts } from '../../libs/alerts'
 import { api } from '../../libs/http'
-import { getRtcConfig } from '../../libs/rtc'
+import { attachRtcDiagnostics, getRtcConfig } from '../../libs/rtc'
 
 const socket = getSocket();
 
@@ -52,6 +52,9 @@ export default function ClientPage() {
   const [isPointerLocked, setIsPointerLocked] = useState(false)
   const [lastInputEvent, setLastInputEvent] = useState('No input yet')
   const [hasRemoteStream, setHasRemoteStream] = useState(false)
+  const [isSignalingActive, setIsSignalingActive] = useState(false)
+  const [isPeerConnected, setIsPeerConnected] = useState(false)
+  const [sessionEndedReason, setSessionEndedReason] = useState('')
   const [hostMeta, setHostMeta] = useState(null)
   const hostMetaRef = useRef(null)
   const [approvedRoomId, setApprovedRoomId] = useState('')
@@ -60,14 +63,29 @@ export default function ClientPage() {
   const pendingSignalsRef = useRef([])
   const handshakeRetryTimeoutRef = useRef(null)
   const streamTimeoutRef = useRef(null)
+  const detachRtcDiagnosticsRef = useRef(null)
+  const lastRemoteStreamRef = useRef(null)
+  const lastNotifiedMessageRef = useRef('')
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
 
+  const shouldPushClientNotification = (text, type) => {
+    if (!text) return false
+    if (type === 'error') return true
+    return (
+      text.includes('Host approved') ||
+      text.includes('Connection Ended')
+    )
+  }
+
   const setStatus = (message, type = 'info') => {
     const text = toText(message)
     setSessionStatus(text)
-    if (text) pushAlert(text, { type })
+    if (!shouldPushClientNotification(text, type)) return
+    if (lastNotifiedMessageRef.current === text) return
+    lastNotifiedMessageRef.current = text
+    pushAlert(text, { type })
   }
 
   const setDbMessage = (message) => {
@@ -76,12 +94,75 @@ export default function ClientPage() {
     if (text) pushAlert(text, { type: 'error' })
   }
 
+  const attachRemoteStream = async (stream) => {
+    if (!videoRef.current) return false
+    lastRemoteStreamRef.current = stream
+    videoRef.current.srcObject = stream
+    try {
+      await videoRef.current.play()
+      window.setTimeout(() => {
+        const video = videoRef.current
+        const track = stream?.getVideoTracks?.()[0]
+        console.log('[client][stream][diagnostics]', {
+          trackReadyState: track?.readyState || 'unknown',
+          trackMuted: Boolean(track?.muted),
+          videoWidth: video?.videoWidth || 0,
+          videoHeight: video?.videoHeight || 0,
+          videoCurrentTime: Number(video?.currentTime || 0).toFixed(3),
+          videoReadyState: video?.readyState ?? -1,
+        })
+      }, 1000)
+      return true
+    } catch (error) {
+      console.error('[client][stream] video play failed', error)
+      setStatus('Connected, but video playback is blocked. Click Enter Control and try again.', 'error')
+      return false
+    }
+  }
+
+  const reconnectSession = () => {
+    const activeRoomId = toText(approvedRoomId || joinedRoomRef.current || roomId)
+    if (!activeRoomId) {
+      setStatus('Reconnect is not available yet.', 'error')
+      return
+    }
+    if (peerRef.current) {
+      peerRef.current.destroy()
+      peerRef.current = null
+    }
+    pendingSignalsRef.current = []
+    setHasRemoteStream(false)
+    setStatus('Reconnecting...')
+    announceClientReady(activeRoomId)
+  }
+
   const requestPointerLock = () => {
     if (!canControlSession) return
     if (videoRef.current) {
       videoRef.current.requestPointerLock();
     }
   };
+
+  const showSessionEnded = (reason) => {
+    const text = toText(reason) || 'The remote session has ended.'
+    setSessionEndedReason(text)
+    setStatus(text, 'error')
+    if (document.pointerLockElement) {
+      document.exitPointerLock()
+    }
+    if (peerRef.current) {
+      peerRef.current.destroy()
+      peerRef.current = null
+    }
+    if (videoRef.current?.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks()
+      tracks.forEach((track) => track.stop())
+      videoRef.current.srcObject = null
+    }
+    setHasRemoteStream(false)
+    setIsPeerConnected(false)
+    setIsSignalingActive(false)
+  }
 
   const togglePointerLock = () => {
     if (document.pointerLockElement === videoRef.current) {
@@ -119,6 +200,10 @@ export default function ClientPage() {
       peerRef.current.destroy()
       peerRef.current = null
     }
+    if (detachRtcDiagnosticsRef.current) {
+      detachRtcDiagnosticsRef.current()
+      detachRtcDiagnosticsRef.current = null
+    }
 
     const peer = new Peer({
       initiator,
@@ -136,12 +221,21 @@ export default function ClientPage() {
         window.clearTimeout(streamTimeoutRef.current)
         streamTimeoutRef.current = null
       }
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        videoRef.current.play()
-        setStatus('Live stream ready. Click on video to control.', 'success')
-        setHasRemoteStream(true)
-      }
+      const videoTrack = stream.getVideoTracks?.()[0]
+      const settings = videoTrack?.getSettings?.() || {}
+      console.log('[client][stream] received', {
+        trackLabel: videoTrack?.label || 'unknown',
+        width: settings.width || 'unknown',
+        height: settings.height || 'unknown',
+        readyState: videoTrack?.readyState || 'unknown',
+        muted: Boolean(videoTrack?.muted),
+      })
+      attachRemoteStream(stream).then((ok) => {
+        if (ok) {
+          setStatus('Live stream ready. Click on video to control.', 'success')
+          setHasRemoteStream(true)
+        }
+      })
 
       if (hostMetaRef.current?.hostDeviceId && deviceId) {
         api.post('/pairings/save', {
@@ -160,17 +254,22 @@ export default function ClientPage() {
     })
 
     peer.on('close', () => {
-      setStatus('Peer connection closed. Try reconnecting the session.', 'error')
-      setHasRemoteStream(false)
+      setIsPeerConnected(false)
+      showSessionEnded('Host left the session.')
+    })
+
+    peer.on('connect', () => {
+      setIsPeerConnected(true)
     })
 
     peerRef.current = peer
+    detachRtcDiagnosticsRef.current = attachRtcDiagnostics(peer, 'client')
     if (streamTimeoutRef.current) {
       window.clearTimeout(streamTimeoutRef.current)
     }
     streamTimeoutRef.current = window.setTimeout(() => {
       if (!videoRef.current?.srcObject) {
-        setStatus('Stream timeout. Host may not be reachable or TURN is required.', 'error')
+        setStatus('Video took too long to arrive. Try Reconnect.', 'error')
       }
     }, 18000)
 
@@ -200,7 +299,7 @@ export default function ClientPage() {
         return
       }
       console.log('[client][handshake] client-ready acknowledged', response)
-      setStatus('Joined room. Waiting for host handshake start...')
+      setStatus('Joined room. Waiting for host to start connection...')
     })
   }
 
@@ -227,6 +326,7 @@ export default function ClientPage() {
           return
         }
         joinedRoomRef.current = targetRoomId
+        setIsSignalingActive(true)
         console.log('[client][join-room] success', response)
         announceClientReady(targetRoomId)
       })
@@ -242,7 +342,7 @@ export default function ClientPage() {
       }
 
       console.log('🟢 Client socket connected. Requesting access for room:', roomId);
-      setStatus('Requesting host approval...')
+      setStatus('Sending request to host...')
       socket.emit('get-room-host-meta', roomId, (meta) => {
         if (meta?.exists) {
           setHostMeta(meta)
@@ -275,13 +375,13 @@ export default function ClientPage() {
   
     socket.on('peer-joined', () => {
       console.log('✅ Peer joined');
-      setStatus('Host found. Establishing secure peer connection...')
+      setStatus('Host found. Connecting...')
     });
 
     socket.on('connection-approved', (payload) => {
       const acceptedRoomId = payload?.roomId || roomId
       setApprovedRoomId(acceptedRoomId)
-      setStatus('Host approved. Joining secure session...', 'success')
+      setStatus('Host approved. Opening remote screen...', 'success')
       joinClientRoom(acceptedRoomId)
     })
 
@@ -314,8 +414,9 @@ export default function ClientPage() {
         return
       }
       console.log('[client][handshake] start-handshake received', payload)
+      setIsSignalingActive(true)
       createPeerConnection(peerSocketId, false)
-      setStatus('Handshake started. Waiting for remote stream...')
+      setStatus('Receiving host screen...')
     })
   
     socket.on('signal', ({ from, data }) => {
@@ -327,6 +428,10 @@ export default function ClientPage() {
       }
       peerRef.current.signal(data)
     });
+
+    socket.on('session-ended', (payload) => {
+      showSessionEnded(payload?.message || 'Host ended the session.')
+    })
   
     return () => {
       if (handshakeRetryTimeoutRef.current) {
@@ -345,6 +450,7 @@ export default function ClientPage() {
       socket.off('join-error');
       socket.off('handshake-error');
       socket.off('start-handshake');
+      socket.off('session-ended');
     };
     }, [roomId, router, deviceId, name, targetHostDeviceId, preapproved]);
   
@@ -392,7 +498,17 @@ export default function ClientPage() {
     }
   }, [roomId, approvedRoomId])
 
+  useEffect(() => {
+    if (!hasRemoteStream) return
+    if (!videoRef.current || !lastRemoteStreamRef.current) return
+    void attachRemoteStream(lastRemoteStreamRef.current)
+  }, [hasRemoteStream])
+
   const handleDisconnect = () => {
+    socket.emit('leave-session', {
+      roomId: toText(approvedRoomId || roomId),
+      message: 'Client ended the session.',
+    })
     if (document.pointerLockElement) {
       document.exitPointerLock()
     }
@@ -401,6 +517,10 @@ export default function ClientPage() {
       peerRef.current.destroy()
       peerRef.current = null
     }
+    if (detachRtcDiagnosticsRef.current) {
+      detachRtcDiagnosticsRef.current()
+      detachRtcDiagnosticsRef.current = null
+    }
 
     if (videoRef.current?.srcObject) {
       const tracks = videoRef.current.srcObject.getTracks()
@@ -408,115 +528,176 @@ export default function ClientPage() {
       videoRef.current.srcObject = null
     }
     setHasRemoteStream(false)
+    setIsPeerConnected(false)
+    setIsSignalingActive(false)
 
     router.push('/home')
   }
 
-  const copyRoomId = async () => {
-    if (!roomId || typeof navigator === 'undefined') return
-    try {
-      await navigator.clipboard.writeText(roomId)
-      setStatus('Room ID copied to clipboard.', 'success')
-    } catch (error) {
-      setStatus('Could not copy room ID.', 'error')
-    }
+  const clientConnectionSteps = [
+    { key: 'signaling', label: 'Signaling', done: isSignalingActive },
+    { key: 'peer', label: 'Peer', done: isPeerConnected || hasRemoteStream },
+    { key: 'stream', label: 'Stream', done: hasRemoteStream },
+  ]
+  const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'peer')
+  const pendingClientStep = requiredClientSteps.find((step) => !step.done)?.label || 'Finalizing'
+  const isClientDetailReady = requiredClientSteps.every((step) => step.done)
+
+  if (sessionEndedReason) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center p-6 ${isDark ? 'bg-[#111318] text-white' : 'bg-slate-100 text-slate-900'}`}>
+        <div className={`w-full max-w-lg rounded-xl border p-8 text-center ${isDark ? 'border-slate-600 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
+          <h2 className={`text-2xl font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>Connection Ended</h2>
+          <p className={`mt-3 text-base ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{toText(sessionEndedReason)}</p>
+          <button
+            type="button"
+            onClick={() => router.push('/home')}
+            className="mt-6 px-5 py-2.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm"
+          >
+            Back to Home
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div className={`min-h-screen relative overflow-hidden ${isDark ? 'bg-[#0b1020] text-white' : 'bg-slate-100 text-slate-900'}`}>
-      <div className={`pointer-events-none absolute -top-16 left-0 h-64 w-64 rounded-full blur-3xl ${isDark ? 'bg-blue-500/10' : 'bg-blue-300/30'}`} />
-      <div className={`relative z-10 w-full h-screen overflow-hidden grid grid-rows-[auto_auto_minmax(0,1fr)_auto] ${isDark ? 'bg-[#121a2c]' : 'bg-white'}`}>
-        <div className={`px-6 py-4 border-b flex items-center justify-between ${isDark ? 'border-slate-800 bg-[#0f172a]' : 'border-slate-200 bg-slate-50'}`}>
+    <div className={`min-h-screen relative overflow-hidden ${isDark ? 'bg-[#111318] text-white' : 'bg-slate-100 text-slate-900'}`}>
+      <div className={`pointer-events-none absolute -top-16 left-0 h-64 w-64 rounded-full blur-3xl ${isDark ? 'bg-red-500/10' : 'bg-red-300/30'}`} />
+      <div className={`relative z-10 w-full h-screen overflow-hidden grid grid-rows-[auto_minmax(0,1fr)_auto] ${isDark ? 'bg-[#171a22]' : 'bg-white'}`}>
+        <div className={`px-5 py-3 border-b flex items-center justify-between ${isDark ? 'border-slate-700 bg-[#1c2029]' : 'border-slate-200 bg-slate-50'}`}>
           <div>
-            <h1 className={`text-2xl font-bold tracking-tight ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>Remote Viewer</h1>
-            <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Room ID: {toText(roomId)}</p>
+            <h1 className={`text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Remote Viewer</h1>
+            <p className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Desk ID: {toText(roomId)}</p>
             {hostMeta?.hostDisplayName ? (
-              <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Host: {toText(hostMeta.hostDisplayName)}</p>
+              <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Host: {toText(hostMeta.hostDisplayName)}</p>
             ) : null}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 text-xs">
             <button
               type="button"
               onClick={toggleTheme}
-              className={`text-xs px-3 py-1.5 rounded-md border ${isDark ? 'border-slate-600 bg-slate-800 text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}
+              className={`px-2.5 py-1.5 rounded-md border ${isDark ? 'border-slate-600 bg-slate-800 text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}
               title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
             >
               <ThemeGlyph isDark={isDark} />
             </button>
-            <span className={`text-xs px-2 py-1 rounded-full border ${isPointerLocked
+            <span className={`px-2 py-1 rounded-full border ${isPointerLocked
               ? (isDark ? 'bg-emerald-700/40 border-emerald-500/40 text-emerald-300' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
               : (isDark ? 'bg-slate-700/50 border-slate-600 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700')
             }`}>
-              {isPointerLocked ? 'Control Active' : canControlSession ? 'Approved' : 'Pending Approval'}
+              {isPointerLocked ? 'Control On' : canControlSession ? 'Approved' : 'Pending'}
             </span>
           </div>
         </div>
 
         {dbUnavailableMessage ? (
-          <div className={`mx-6 mt-4 rounded-lg border px-4 py-3 text-sm ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-200' : 'border-red-300 bg-red-50 text-red-700'}`}>
+          <div className={`mx-5 mt-3 rounded-lg border px-4 py-3 text-sm ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-200' : 'border-red-300 bg-red-50 text-red-700'}`}>
             {toText(dbUnavailableMessage)}
           </div>
         ) : null}
 
-        <div className="min-h-0 overflow-y-auto p-6 space-y-4">
-          <div className="grid md:grid-cols-3 gap-3">
-            <button
-              onClick={togglePointerLock}
-              disabled={!canControlSession}
-              className={`px-4 py-2 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed ${isPointerLocked ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}
-            >
-              {isPointerLocked ? 'Exit Control' : 'Enter Control'}
-            </button>
-            <button
-              onClick={copyRoomId}
-              className="px-4 py-2 rounded-lg transition bg-slate-700 hover:bg-slate-600"
-            >
-              Copy Room ID
-            </button>
-            <button
-              onClick={handleDisconnect}
-              className="px-4 py-2 rounded-lg transition bg-red-600 hover:bg-red-700"
-            >
-              Disconnect
-            </button>
-          </div>
+        <div className="min-h-0 overflow-hidden p-5">
+          {isClientDetailReady ? (
+            <div className="h-full grid lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
+            <section className={`rounded-xl border overflow-hidden flex flex-col ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
+              <div className={`px-4 py-2.5 text-xs border-b flex items-center justify-between ${isDark ? 'border-slate-700 text-slate-300 bg-[#202531]' : 'border-slate-200 text-slate-600 bg-slate-50'}`}>
+                <span>Host Screen</span>
+                <span className="font-mono">{hasRemoteStream ? 'live' : 'waiting'}</span>
+              </div>
+              <div className="flex-1 p-3">
+                {hasRemoteStream ? (
+                  <div className="h-full bg-black border border-gray-700 rounded-lg overflow-hidden">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                      onClick={requestPointerLock}
+                    />
+                  </div>
+                ) : (
+                  <div className={`h-full rounded-lg border min-h-[260px] md:min-h-[320px] flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#0f172a]' : 'border-slate-300 bg-slate-50'}`}>
+                    <WifiSignalIcon isDark={isDark} />
+                    <p className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Waiting for secure session</p>
+                    <p className={`text-sm mt-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                      Video appears once peer handshake and stream delivery complete.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </section>
 
-          {hasRemoteStream ? (
-            <div className="bg-black border border-gray-700 rounded-lg overflow-hidden">
-              <video
-                ref={videoRef}
-                autoPlay
-                className="w-full h-[38vh] lg:h-[46vh] object-contain"
-                onClick={requestPointerLock}
-              />
+            <aside className={`rounded-xl border p-3 overflow-y-auto space-y-3 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-slate-50'}`}>
+              <div className={`rounded-lg border p-3 ${isDark ? 'border-slate-600 bg-[#202531]' : 'border-slate-300 bg-white'}`}>
+                <p className={`text-xs uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Session Controls</p>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={togglePointerLock}
+                    disabled={!canControlSession}
+                    className={`col-span-2 px-3 py-2 rounded-md text-sm transition disabled:opacity-50 disabled:cursor-not-allowed ${isPointerLocked ? 'bg-red-700 hover:bg-red-600' : 'bg-red-600 hover:bg-red-500'}`}
+                  >
+                    {isPointerLocked ? 'Exit Control' : 'Enter Control'}
+                  </button>
+                  <button
+                    onClick={reconnectSession}
+                    className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-[#3a404d] hover:bg-[#4a5160] text-white"
+                  >
+                    Reconnect
+                  </button>
+                  <button
+                    onClick={handleDisconnect}
+                    className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-red-700 hover:bg-red-600 text-white"
+                  >
+                    End Session
+                  </button>
+                </div>
+              </div>
+
+              <div className={`rounded-lg border p-3 text-sm ${isDark ? 'border-slate-600 bg-[#202531] text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}>
+                <p>{toText(sessionStatus)}</p>
+                <p className={`mt-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                  {isPointerLocked
+                    ? 'Control mode active (Esc to unlock).'
+                    : canControlSession
+                      ? 'Approved. Click video or use Enter Control to start input.'
+                      : 'Waiting for host approval before entering live control.'}
+                </p>
+                <p className={`mt-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Last input: {toText(lastInputEvent)}</p>
+              </div>
+
+              <div className={`rounded-lg border p-3 text-xs ${isDark ? 'border-slate-600 bg-[#202531] text-slate-400' : 'border-slate-300 bg-white text-slate-600'}`}>
+                Tip: Keep control mode off when you are only observing the host screen.
+              </div>
+            </aside>
             </div>
           ) : (
-            <div className={`rounded-lg border min-h-[260px] md:min-h-[320px] flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#0f172a]' : 'border-slate-300 bg-slate-50'}`}>
-              <WifiSignalIcon isDark={isDark} />
-              <p className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Waiting for secure session</p>
-              <p className={`text-sm mt-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                Signaling in progress. Video will appear after host approval and connection setup.
-              </p>
+            <div className={`h-full rounded-xl border flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
+              <div className="h-12 w-12 rounded-full border-4 border-slate-500/40 border-t-red-500 animate-spin" />
+              <p className={`mt-4 text-lg font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session...</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Current step: {pendingClientStep}</p>
+              <div className="mt-4 space-y-1 text-sm">
+                {clientConnectionSteps.map((step) => (
+                  <p key={step.key} className={step.done ? (isDark ? 'text-emerald-300' : 'text-emerald-700') : (isDark ? 'text-slate-400' : 'text-slate-500')}>
+                    {step.done ? 'Done' : 'Waiting'} - {step.label}
+                  </p>
+                ))}
+              </div>
             </div>
           )}
         </div>
 
-        <div className="px-6 pb-6 space-y-3">
-          <div className={`rounded-xl border p-3 text-sm space-y-1 ${isDark ? 'border-slate-700 bg-[#18233b] text-gray-300' : 'border-slate-300 bg-slate-50 text-slate-700'}`}>
-            <p>{toText(sessionStatus)}</p>
-            <p>
-              {isPointerLocked
-                ? 'Control mode active (Esc to unlock).'
-                : canControlSession
-                  ? 'Host approved. Click video or use Enter Control to start input.'
-                  : 'Waiting for host approval before entering the live session.'}
+        <div className={`px-5 pb-4 pt-2 border-t ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
+          {isClientDetailReady ? (
+            <p className={`text-center text-sm ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+              {hasRemoteStream ? 'Receiving host stream.' : 'Waiting for host stream.'}
             </p>
-            <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Last input: {toText(lastInputEvent)}</p>
-          </div>
-
-          <p className={`text-center text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-            Tip: Keep control mode off when you are only observing the host screen.
-          </p>
+          ) : (
+            <p className={`text-center text-sm ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+              Connecting... please wait.
+            </p>
+          )}
         </div>
       </div>
     </div>

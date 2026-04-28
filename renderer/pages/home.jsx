@@ -87,13 +87,26 @@ export default function HomePage() {
   })
   const outboundRequestTimeoutRef = useRef(null)
   const pendingOutboundAddressRef = useRef('')
+  const lastNotifiedMessageRef = useRef('')
   const router = useRouter()
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
 
+  const shouldPushHomeNotification = (text, type) => {
+    if (!text) return false
+    if (type === 'error') return true
+    return (
+      text.includes('Opening session') ||
+      text.includes('Incoming request')
+    )
+  }
+
   const notify = (message, type = 'info') => {
     const text = toText(message)
     if (!text) return
+    if (!shouldPushHomeNotification(text, type)) return
+    if (lastNotifiedMessageRef.current === text) return
+    lastNotifiedMessageRef.current = text
     pushAlert(text, { type })
   }
 

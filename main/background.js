@@ -8,11 +8,18 @@ import {
   desktopCapturer,
   systemPreferences,
   shell,
+  screen,
 } from "electron";
 import serve from "electron-serve";
 import { createWindow } from "./helpers";
 
 const isProd = process.env.NODE_ENV === "production";
+let preferredScreenSourceId = "";
+
+if (process.platform === "darwin") {
+  // Workaround for known macOS window capture black-frame regressions.
+  app.commandLine.appendSwitch("disable-features", "WindowCaptureMacV2");
+}
 
 const resolveAppIconPath = () => {
   const macCandidates = [
@@ -51,14 +58,52 @@ app.setName("Remotix");
     }
   }
 
-  // ✅ Electron screen/media permission handler
+  // Keep Electron display media flow available.
+  // If system picker is available, Electron will use it.
+  // Otherwise, fallback to the first full-screen source.
   session.defaultSession.setDisplayMediaRequestHandler(
-    (request, callback) => {
-      desktopCapturer.getSources({ types: ["screen"] }).then((sources) => {
-        callback({ video: sources[0], audio: "loopback" });
-      });
+    async (_request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({
+          types: ["screen"],
+          thumbnailSize: { width: 0, height: 0 },
+        });
+        const primaryDisplayId = String(screen.getPrimaryDisplay()?.id || "");
+        const screenSources = sources.filter((source) =>
+          source.id.startsWith("screen:"),
+        );
+        const screenSource =
+          screenSources.find((source) => source.id === preferredScreenSourceId) ||
+          screenSources.find(
+            (source) =>
+              String(source.display_id || "").trim() === primaryDisplayId,
+          ) || screenSources[0];
+        if (!screenSource) {
+          console.error("[display-media] no screen source available");
+          callback({ video: null, audio: null });
+          return;
+        }
+        console.log(
+          "[display-media] available sources",
+          screenSources.map((source) => ({
+            id: source.id,
+            name: source.name,
+            displayId: source.display_id,
+          })),
+        );
+        console.log("[display-media] selected source", {
+          id: screenSource.id,
+          name: screenSource.name,
+          displayId: screenSource.display_id,
+          primaryDisplayId,
+        });
+        callback({ video: screenSource, audio: "loopback" });
+      } catch (error) {
+        console.error("[display-media] failed to resolve source", error);
+        callback({ video: null, audio: null });
+      }
     },
-    { useSystemPicker: true },
+    { useSystemPicker: false },
   );
 
   // ✅ Create browser window
@@ -98,9 +143,8 @@ const getPermissionStatus = () => {
   }
 
   const screen = systemPreferences.getMediaAccessStatus("screen");
-  const accessibilityGranted = systemPreferences.isTrustedAccessibilityClient(
-    false,
-  );
+  const accessibilityGranted =
+    systemPreferences.isTrustedAccessibilityClient(false);
 
   const requirements = [
     {
@@ -148,6 +192,33 @@ ipcMain.handle("permissions:request", async (_event, payload = {}) => {
   }
 
   return getPermissionStatus();
+});
+
+ipcMain.handle("desktop:screen-sources", async () => {
+  const primaryDisplayId = String(screen.getPrimaryDisplay()?.id || "");
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    thumbnailSize: { width: 0, height: 0 },
+  });
+
+  const normalized = sources
+    .filter((source) => source.id.startsWith("screen:"))
+    .map((source) => ({
+      id: source.id,
+      name: source.name,
+      displayId: String(source.display_id || ""),
+      thumbnail: source.thumbnail?.toDataURL?.() || "",
+    }));
+
+  return {
+    primaryDisplayId,
+    sources: normalized,
+  };
+});
+
+ipcMain.handle("desktop:set-selected-source", async (_event, payload = {}) => {
+  preferredScreenSourceId = String(payload?.sourceId || "").trim();
+  return { ok: true, sourceId: preferredScreenSourceId };
 });
 
 ipcMain.on("message", async (event, arg) => {
