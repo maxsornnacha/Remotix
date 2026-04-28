@@ -421,10 +421,11 @@ io.on("connection", (socket) => {
         payload.displayName || "Host Device",
       ).catch(() => {});
 
+      const existingState = roomHandshakeState.get(roomId);
       roomHandshakeState.set(roomId, {
         hostSocketId: socket.id,
         isHostReady: false,
-        readyClients: new Set(),
+        readyClients: existingState?.readyClients || new Set(),
       });
     }
 
@@ -491,15 +492,18 @@ io.on("connection", (socket) => {
     }
     const state = roomHandshakeState.get(safeRoomId);
     if (!state) {
+      const pendingState = {
+        hostSocketId: "",
+        isHostReady: false,
+        readyClients: new Set([socket.id]),
+      };
+      roomHandshakeState.set(safeRoomId, pendingState);
       callback?.({
-        ok: false,
-        message: "Room handshake state not found. Wait for host readiness.",
+        ok: true,
+        roomId: safeRoomId,
+        pendingHost: true,
+        message: "Waiting for host to join room before handshake starts.",
       });
-      emitHandshakeError(
-        socket.id,
-        "Room handshake state not found. Wait for host readiness.",
-        "room_state_missing",
-      );
       return;
     }
     state.readyClients.add(socket.id);
@@ -622,7 +626,8 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const roomId = hostInfo.roomId || incomingRoomId || "";
+    const roomId =
+      hostInfo.roomId || incomingRoomId || crypto.randomUUID().replace(/-/g, "");
 
     await store.setPendingRequest(socket.id, {
       roomId,
