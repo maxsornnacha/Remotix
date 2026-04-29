@@ -114,6 +114,25 @@ export default function ClientPage() {
     videoRef.current.srcObject = stream
     try {
       await videoRef.current.play()
+      const renderReady = await new Promise((resolve) => {
+        const startedAt = Date.now()
+        const check = () => {
+          const video = videoRef.current
+          if (!video) return resolve(false)
+          const hasFrame = video.videoWidth > 0 && video.videoHeight > 0
+          const hasPlaybackProgress = Number(video.currentTime || 0) > 0
+          if (hasFrame || hasPlaybackProgress) {
+            resolve(true)
+            return
+          }
+          if (Date.now() - startedAt > 2400) {
+            resolve(false)
+            return
+          }
+          window.setTimeout(check, 120)
+        }
+        check()
+      })
       window.setTimeout(() => {
         const video = videoRef.current
         const track = stream?.getVideoTracks?.()[0]
@@ -126,7 +145,7 @@ export default function ClientPage() {
           videoReadyState: video?.readyState ?? -1,
         })
       }, 1000)
-      return true
+      return renderReady
     } catch (error) {
       console.error('[client][stream] video play failed', error)
       setStatus('Connected, but video playback is blocked. Click Enter Control and try again.', 'error')
@@ -231,7 +250,7 @@ export default function ClientPage() {
     })
 
     peer.on('stream', (stream) => {
-      setHasRemoteStream(true)
+      setHasRemoteStream(false)
       if (streamTimeoutRef.current) {
         window.clearTimeout(streamTimeoutRef.current)
         streamTimeoutRef.current = null
@@ -245,12 +264,21 @@ export default function ClientPage() {
         readyState: videoTrack?.readyState || 'unknown',
         muted: Boolean(videoTrack?.muted),
       })
+      if (videoTrack) {
+        videoTrack.onunmute = () => {
+          console.log('[client][stream] video track unmuted, retry attach')
+          void attachRemoteStream(stream).then((ok) => {
+            if (ok) setHasRemoteStream(true)
+          })
+        }
+      }
       attachRemoteStream(stream).then((ok) => {
         if (ok) {
+          setHasRemoteStream(true)
           setStatus('Live stream ready. Click on video to control.', 'success')
           return
         }
-        setStatus('Stream received. Trying to start playback...', 'info')
+        setStatus('Stream received. Waiting for first video frames...', 'info')
       })
 
       if (hostMetaRef.current?.hostDeviceId && deviceId) {

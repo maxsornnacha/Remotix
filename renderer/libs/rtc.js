@@ -14,6 +14,12 @@ const parseTurnUrls = (value) =>
     .map((item) => item.trim())
     .filter(Boolean)
 
+const maskSecret = (value) => {
+  if (!value) return ''
+  if (value.length <= 2) return '*'.repeat(value.length)
+  return `${value.slice(0, 1)}${'*'.repeat(Math.max(1, value.length - 2))}${value.slice(-1)}`
+}
+
 export const getRtcConfig = () => {
   const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
 
@@ -39,6 +45,15 @@ export const getRtcConfig = () => {
   if (forceRelay) {
     config.iceTransportPolicy = 'relay'
   }
+
+  console.log('[rtc] config', {
+    turnUrls,
+    turnUsername,
+    turnCredential: maskSecret(turnCredential),
+    turnRealm,
+    forceRelay,
+    iceTransportPolicy: config.iceTransportPolicy || 'all',
+  })
 
   return config
 }
