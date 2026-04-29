@@ -474,7 +474,10 @@ export default function HostPage() {
 
     if (typeof window !== 'undefined') {
       const policyConsent = window.localStorage.getItem('remotix-policy-consent')
-      if (policyConsent !== 'accepted') {
+      // Only block explicit rejection. Missing value can happen during cross-device
+      // routing or stale local storage sync and should not hard-bounce the host page.
+      if (policyConsent === 'rejected') {
+        setNotice('Please accept the usage policy before starting a session.', 'error')
         router.replace('/home')
         return
       }
