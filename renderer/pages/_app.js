@@ -118,49 +118,58 @@ function ServiceGuard({ children }) {
     message: "Unable to verify service status.",
   });
 
-  const checkServiceHealth = useCallback(async ({ foreground = false } = {}) => {
-    if (typeof window === "undefined") return;
-    if (foreground || !hasCheckedOnce) {
-      setIsChecking(true);
-    }
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 4500);
-
-    try {
-      const { data: payload } = await api.get("/status", { signal: controller.signal });
-
-      if (payload?.dbConnected === false) {
-        setIsUnavailable(true);
-        setReason({
-          title: "Cannot connect to database",
-          message:
-            "MongoDB is unavailable. Remote features are temporarily locked.",
-        });
-        return;
+  const checkServiceHealth = useCallback(
+    async ({ foreground = false } = {}) => {
+      if (typeof window === "undefined") return;
+      if (foreground || !hasCheckedOnce) {
+        setIsChecking(true);
       }
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 4500);
 
-      setIsUnavailable(false);
-      setReason({
-        title: "Service unavailable",
-        message: "Unable to verify service status.",
-      });
-    } catch (error) {
-      setIsUnavailable(true);
-      const isTimeout = error?.name === "AbortError" || error?.code === "ERR_CANCELED";
-      const statusCode = error?.response?.status;
-      const serverMessage = error?.response?.data?.message;
-      setReason({
-        title: "Cannot connect to server",
-        message: isTimeout
-          ? "Server health check timed out. Please verify backend service and network."
-          : serverMessage || (statusCode ? `Status API returned HTTP ${statusCode}.` : "Server is unreachable. Please start API server and try again."),
-      });
-    } finally {
-      window.clearTimeout(timeout);
-      setIsChecking(false);
-      setHasCheckedOnce(true);
-    }
-  }, [hasCheckedOnce]);
+      try {
+        const { data: payload } = await api.get("/status", {
+          signal: controller.signal,
+        });
+
+        if (payload?.dbConnected === false) {
+          setIsUnavailable(true);
+          setReason({
+            title: "Cannot connect to database",
+            message:
+              "MongoDB is unavailable. Remote features are temporarily locked.",
+          });
+          return;
+        }
+
+        setIsUnavailable(false);
+        setReason({
+          title: "Service unavailable",
+          message: "Unable to verify service status.",
+        });
+      } catch (error) {
+        setIsUnavailable(true);
+        const isTimeout =
+          error?.name === "AbortError" || error?.code === "ERR_CANCELED";
+        const statusCode = error?.response?.status;
+        const serverMessage = error?.response?.data?.message;
+        setReason({
+          title: "Cannot connect to server",
+          message: isTimeout
+            ? "Server health check timed out. Please verify backend service and network."
+            : serverMessage ||
+              (statusCode
+                ? `Status API returned HTTP ${statusCode}.`
+                : "Server is unreachable. Please start API server and try again."),
+        });
+      } finally {
+        window.clearTimeout(timeout);
+        setIsChecking(false);
+        setHasCheckedOnce(true);
+      }
+    },
+    [hasCheckedOnce],
+  );
 
   useEffect(() => {
     checkServiceHealth({ foreground: true });
@@ -208,12 +217,10 @@ function ServiceGuard({ children }) {
 
 function AlertViewport({ alerts, onClose }) {
   const toneClasses = {
-    error:
-      "border-red-300/80 bg-red-50/90 text-red-900 shadow-red-500/10",
+    error: "border-red-300/80 bg-red-50/90 text-red-900 shadow-red-500/10",
     success:
       "border-emerald-300/80 bg-emerald-50/90 text-emerald-900 shadow-emerald-500/10",
-    info:
-      "border-slate-300/80 bg-slate-50/90 text-slate-900 shadow-slate-500/10",
+    info: "border-slate-300/80 bg-slate-50/90 text-slate-900 shadow-slate-500/10",
   };
 
   const iconByType = {
@@ -237,8 +244,8 @@ function AlertViewport({ alerts, onClose }) {
                   item.type === "error"
                     ? "bg-red-100 text-red-700"
                     : item.type === "success"
-                    ? "bg-emerald-100 text-emerald-700"
-                    : "bg-slate-200 text-slate-700"
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "bg-slate-200 text-slate-700"
                 }`}>
                 {iconByType[item.type] || iconByType.info}
               </span>
@@ -282,23 +289,33 @@ export default function MyApp({ Component, pageProps }) {
     setAlerts((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
-  const pushAlert = useCallback((message, options = {}) => {
-    const safeMessage =
-      typeof message === "string" && message.trim()
-        ? message.trim()
-        : "Notification";
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const type = options.type || "info";
-    setAlerts((prev) => {
-      const last = prev[prev.length - 1];
-      if (last && last.message === safeMessage && Date.now() - last.createdAt < 1200) {
-        return prev;
-      }
-      return [...prev, { id, message: safeMessage, type, createdAt: Date.now() }].slice(-4);
-    });
-    const timeoutMs = options.timeoutMs ?? 3800;
-    window.setTimeout(() => removeAlert(id), timeoutMs);
-  }, [removeAlert]);
+  const pushAlert = useCallback(
+    (message, options = {}) => {
+      const safeMessage =
+        typeof message === "string" && message.trim()
+          ? message.trim()
+          : "Notification";
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const type = options.type || "info";
+      setAlerts((prev) => {
+        const last = prev[prev.length - 1];
+        if (
+          last &&
+          last.message === safeMessage &&
+          Date.now() - last.createdAt < 1200
+        ) {
+          return prev;
+        }
+        return [
+          ...prev,
+          { id, message: safeMessage, type, createdAt: Date.now() },
+        ].slice(-4);
+      });
+      const timeoutMs = options.timeoutMs ?? 3800;
+      window.setTimeout(() => removeAlert(id), timeoutMs);
+    },
+    [removeAlert],
+  );
 
   return (
     <AppErrorBoundary>

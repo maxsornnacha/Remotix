@@ -48,6 +48,7 @@ export default function ClientPage() {
   const { roomId, deviceId, name, targetHostDeviceId, preapproved } = router.query
 
   const videoRef = useRef(null)
+  const blackFrameCanvasRef = useRef(null)
   const [sessionStatus, setSessionStatus] = useState('Connecting to host...')
   const [isPointerLocked, setIsPointerLocked] = useState(false)
   const [lastInputEvent, setLastInputEvent] = useState('No input yet')
@@ -71,6 +72,9 @@ export default function ClientPage() {
   const mouseDeltaRef = useRef({ x: 0, y: 0 })
   const mouseFrameRef = useRef(null)
   const pressedKeysRef = useRef(new Set())
+  const blackFrameHitsRef = useRef(0)
+  const blackRefreshRequestedRef = useRef(false)
+  const noFrameHitsRef = useRef(0)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
@@ -227,6 +231,7 @@ export default function ClientPage() {
     })
 
     peer.on('stream', (stream) => {
+      setHasRemoteStream(true)
       if (streamTimeoutRef.current) {
         window.clearTimeout(streamTimeoutRef.current)
         streamTimeoutRef.current = null
@@ -243,8 +248,9 @@ export default function ClientPage() {
       attachRemoteStream(stream).then((ok) => {
         if (ok) {
           setStatus('Live stream ready. Click on video to control.', 'success')
-          setHasRemoteStream(true)
+          return
         }
+        setStatus('Stream received. Trying to start playback...', 'info')
       })
 
       if (hostMetaRef.current?.hostDeviceId && deviceId) {
@@ -585,6 +591,99 @@ export default function ClientPage() {
   }, [hasRemoteStream])
 
   useEffect(() => {
+    if (!hasRemoteStream) return
+    const intervalId = window.setInterval(() => {
+      const video = videoRef.current
+      const canvas = blackFrameCanvasRef.current
+      if (!video || !canvas) return
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        noFrameHitsRef.current += 1
+        if (noFrameHitsRef.current >= 5 && !blackRefreshRequestedRef.current) {
+          blackRefreshRequestedRef.current = true
+          noFrameHitsRef.current = 0
+          const activeRoomId = toText(approvedRoomId || roomId)
+          if (!activeRoomId) return
+          setStatus('Stream connected but no video frames yet. Requesting host refresh...')
+          socket.emit('client-request-stream-refresh', {
+            roomId: activeRoomId,
+            reason: 'client-no-frame',
+          })
+        }
+        return
+      }
+      noFrameHitsRef.current = 0
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      canvas.width = 32
+      canvas.height = 18
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+      let sum = 0
+      for (let i = 0; i < frame.length; i += 4) {
+        sum += frame[i] + frame[i + 1] + frame[i + 2]
+      }
+      const avgBrightness = sum / (frame.length / 4) / 3
+
+      if (avgBrightness < 4) {
+        blackFrameHitsRef.current += 1
+      } else {
+        blackFrameHitsRef.current = 0
+        blackRefreshRequestedRef.current = false
+        noFrameHitsRef.current = 0
+      }
+
+      if (blackFrameHitsRef.current >= 3 && !blackRefreshRequestedRef.current) {
+        blackRefreshRequestedRef.current = true
+        blackFrameHitsRef.current = 0
+        const activeRoomId = toText(approvedRoomId || roomId)
+        if (!activeRoomId) return
+        setStatus('Black screen detected. Requesting host refresh...')
+        socket.emit('client-request-stream-refresh', {
+          roomId: activeRoomId,
+          reason: 'client-black-frame',
+        })
+      }
+    }, 1200)
+
+    return () => window.clearInterval(intervalId)
+  }, [hasRemoteStream, approvedRoomId, roomId])
+
+  useEffect(() => {
+    if (hasRemoteStream) return
+    if (!lastRemoteStreamRef.current || !videoRef.current) return
+    const timer = window.setTimeout(() => {
+      void attachRemoteStream(lastRemoteStreamRef.current).then((ok) => {
+        if (ok) setHasRemoteStream(true)
+      })
+    }, 600)
+    return () => window.clearTimeout(timer)
+  }, [hasRemoteStream, sessionStatus])
+
+  useEffect(() => {
+    if (!hasRemoteStream) return
+    const video = videoRef.current
+    if (!video?.srcObject) return
+
+    let attempts = 0
+    const retryTimer = window.setInterval(() => {
+      const currentVideo = videoRef.current
+      if (!currentVideo?.srcObject) return
+      if (!currentVideo.paused) {
+        window.clearInterval(retryTimer)
+        return
+      }
+      attempts += 1
+      void currentVideo.play().catch(() => {})
+      if (attempts >= 6) {
+        window.clearInterval(retryTimer)
+      }
+    }, 700)
+
+    return () => window.clearInterval(retryTimer)
+  }, [hasRemoteStream])
+
+  useEffect(() => {
     const room = toText(approvedRoomId || roomId)
     if (!room) return
 
@@ -640,6 +739,9 @@ export default function ClientPage() {
     setIsPeerConnected(false)
     setIsSignalingActive(false)
     setLatencyMs(null)
+    blackFrameHitsRef.current = 0
+    blackRefreshRequestedRef.current = false
+    noFrameHitsRef.current = 0
 
     router.push('/home')
   }
@@ -649,7 +751,7 @@ export default function ClientPage() {
     { key: 'peer', label: 'Peer', done: isPeerConnected || hasRemoteStream },
     { key: 'stream', label: 'Stream', done: hasRemoteStream },
   ]
-  const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'peer')
+  const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'stream')
   const pendingClientStep = requiredClientSteps.find((step) => !step.done)?.label || 'Finalizing'
   const isClientDetailReady = requiredClientSteps.every((step) => step.done)
 
@@ -721,26 +823,25 @@ export default function ClientPage() {
                 <span className="font-mono">{hasRemoteStream ? 'live' : 'waiting'}</span>
               </div>
               <div className="flex-1 p-3">
-                {hasRemoteStream ? (
-                  <div className="h-full bg-black border border-gray-700 rounded-lg overflow-hidden">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover"
-                      onClick={requestPointerLock}
-                    />
-                  </div>
-                ) : (
-                  <div className={`h-full rounded-lg border min-h-[260px] md:min-h-[320px] flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#0f172a]' : 'border-slate-300 bg-slate-50'}`}>
-                    <WifiSignalIcon isDark={isDark} />
-                    <p className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Waiting for secure session</p>
-                    <p className={`text-sm mt-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                      Video appears once peer handshake and stream delivery complete.
-                    </p>
-                  </div>
-                )}
+                <div className="relative h-full bg-black border border-gray-700 rounded-lg overflow-hidden">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className={`w-full h-full object-cover ${hasRemoteStream ? 'opacity-100' : 'opacity-0'}`}
+                    onClick={requestPointerLock}
+                  />
+                  {!hasRemoteStream ? (
+                    <div className={`absolute inset-0 flex flex-col items-center justify-center text-center px-6 ${isDark ? 'bg-[#0f172a]' : 'bg-slate-50'}`}>
+                      <WifiSignalIcon isDark={isDark} />
+                      <p className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Waiting for secure session</p>
+                      <p className={`text-sm mt-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Video appears once peer handshake and stream delivery complete.
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </section>
 
@@ -827,6 +928,7 @@ export default function ClientPage() {
           )}
         </div>
       </div>
+      <canvas ref={blackFrameCanvasRef} className="hidden" />
     </div>
   )
 }
