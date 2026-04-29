@@ -26,6 +26,31 @@ const toText = (value) => {
   if (typeof value === 'string' || typeof value === 'number') return String(value)
   return ''
 }
+
+const isScreenSource = (sourceId) => toText(sourceId).startsWith('screen:')
+
+const sortSourcesForStableShare = (sources, selectedId, primaryDisplayId) => {
+  const normalizedSelected = toText(selectedId)
+  const normalizedPrimary = toText(primaryDisplayId)
+  const list = Array.isArray(sources) ? sources : []
+  const screens = list.filter((item) => isScreenSource(item?.id))
+  const windows = list.filter((item) => !isScreenSource(item?.id))
+  const base = screens.length > 0 ? screens : [...screens, ...windows]
+
+  return [
+    ...base.filter((item) => toText(item.id) === normalizedSelected),
+    ...base.filter(
+      (item) =>
+        toText(item.id) !== normalizedSelected &&
+        toText(item.displayId) === normalizedPrimary,
+    ),
+    ...base.filter(
+      (item) =>
+        toText(item.id) !== normalizedSelected &&
+        toText(item.displayId) !== normalizedPrimary,
+    ),
+  ]
+}
 function ThemeGlyph({ isDark }) {
   if (isDark) {
     return (
@@ -443,7 +468,9 @@ export default function HostPage() {
     if (!window.ipc?.invoke) return ''
     try {
       const { primaryDisplayId, sources: normalized } = await fetchScreenSources()
+      const ordered = sortSourcesForStableShare(normalized, selectedSourceId, primaryDisplayId)
       const preferred =
+        ordered[0] ||
         normalized.find((item) => toText(item.id) === toText(selectedSourceId)) ||
         normalized.find((item) => toText(item.displayId) === primaryDisplayId) ||
         normalized[0]
@@ -667,11 +694,7 @@ export default function HostPage() {
           })
         }
         const { primaryDisplayId, sources } = await fetchScreenSources()
-        const orderedSources = [
-          ...sources.filter((item) => toText(item.id) === finalSourceId),
-          ...sources.filter((item) => toText(item.displayId) === primaryDisplayId && toText(item.id) !== finalSourceId),
-          ...sources.filter((item) => toText(item.id) !== finalSourceId && toText(item.displayId) !== primaryDisplayId),
-        ]
+        const orderedSources = sortSourcesForStableShare(sources, finalSourceId, primaryDisplayId)
 
         let stream = null
         let resolvedSourceId = ''
@@ -1093,6 +1116,10 @@ export default function HostPage() {
                   key={source.id}
                   type="button"
                   onClick={async () => {
+                    if (!isScreenSource(source.id)) {
+                      setNotice('Window sharing can freeze when minimized. Please choose an entire screen.', 'info')
+                      return
+                    }
                     setSelectedSourceId(source.id)
                     setIsSourcePickerOpen(false)
                     await ensureScreenSharingStarted(true)
@@ -1107,7 +1134,10 @@ export default function HostPage() {
                     />
                   ) : null}
                   <p className="text-sm font-medium">{source.name}</p>
-                  <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{source.id}</p>
+                  <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    {source.id}
+                    {!isScreenSource(source.id) ? ' (window capture: may freeze when minimized)' : ''}
+                  </p>
                 </button>
               ))}
             </div>

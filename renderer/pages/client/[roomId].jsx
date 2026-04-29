@@ -51,6 +51,7 @@ export default function ClientPage() {
   const blackFrameCanvasRef = useRef(null)
   const [sessionStatus, setSessionStatus] = useState('Connecting to host...')
   const [isPointerLocked, setIsPointerLocked] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [lastInputEvent, setLastInputEvent] = useState('No input yet')
   const [hasRemoteStream, setHasRemoteStream] = useState(false)
   const [isSignalingActive, setIsSignalingActive] = useState(false)
@@ -182,6 +183,20 @@ export default function ClientPage() {
     }
   };
 
+  const toggleFullscreen = async () => {
+    const video = videoRef.current
+    if (!video) return
+    try {
+      if (document.fullscreenElement === video) {
+        await document.exitFullscreen()
+        return
+      }
+      await video.requestFullscreen()
+    } catch (_error) {
+      setStatus('Could not toggle fullscreen mode.', 'error')
+    }
+  }
+
   const showSessionEnded = (reason) => {
     const text = toText(reason) || 'The remote session has ended.'
     setSessionEndedReason(text)
@@ -230,6 +245,14 @@ export default function ClientPage() {
       document.removeEventListener('pointerlockerror', handlePointerLockError);
     };
   }, []);  
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === videoRef.current)
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
 
   const peerRef = useRef(null)
 
@@ -918,6 +941,12 @@ export default function ClientPage() {
                     className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-[#3a404d] hover:bg-[#4a5160] text-white"
                   >
                     Reconnect
+                  </button>
+                  <button
+                    onClick={toggleFullscreen}
+                    className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-[#3a404d] hover:bg-[#4a5160] text-white"
+                  >
+                    {isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
                   </button>
                   <label className="col-span-2 text-xs text-left">
                     <span className={`${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Control sensitivity</span>
