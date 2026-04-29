@@ -9,12 +9,14 @@ export const getRtcConfig = () => {
   const turnUrl = toText(process.env.NEXT_PUBLIC_TURN_URL)
   const turnUsername = toText(process.env.NEXT_PUBLIC_TURN_USERNAME)
   const turnCredential = toText(process.env.NEXT_PUBLIC_TURN_CREDENTIAL)
+  const turnRealm = toText(process.env.NEXT_PUBLIC_TURN_REALM)
 
   if (turnUrl && turnUsername && turnCredential) {
     iceServers.push({
       urls: turnUrl,
       username: turnUsername,
       credential: turnCredential,
+      ...(turnRealm ? { realm: turnRealm } : {}),
     })
   }
 
