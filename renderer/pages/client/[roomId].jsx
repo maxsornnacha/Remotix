@@ -110,6 +110,12 @@ export default function ClientPage() {
 
   const attachRemoteStream = async (stream) => {
     if (!videoRef.current) return false
+    const videoTracks = stream?.getVideoTracks?.() || []
+    const hasLiveVideoTrack = videoTracks.some((track) => track?.readyState === 'live')
+    if (!hasLiveVideoTrack) {
+      console.log('[client][stream] skip attach: no live video track yet')
+      return false
+    }
     lastRemoteStreamRef.current = stream
     videoRef.current.srcObject = stream
     try {
@@ -613,7 +619,13 @@ export default function ClientPage() {
   }, [roomId, approvedRoomId, controlProfile])
 
   useEffect(() => {
-    if (!hasRemoteStream) return
+    if (!hasRemoteStream) {
+      if (videoRef.current && !lastRemoteStreamRef.current) {
+        videoRef.current.pause()
+        videoRef.current.srcObject = null
+      }
+      return
+    }
     if (!videoRef.current || !lastRemoteStreamRef.current) return
     void attachRemoteStream(lastRemoteStreamRef.current)
   }, [hasRemoteStream])
@@ -687,6 +699,17 @@ export default function ClientPage() {
     }, 600)
     return () => window.clearTimeout(timer)
   }, [hasRemoteStream, sessionStatus])
+
+  useEffect(() => {
+    if (hasRemoteStream) return
+    const video = videoRef.current
+    if (!video) return
+    // Prevent stale frame playback before new stream is actually attached.
+    video.pause()
+    if (!lastRemoteStreamRef.current) {
+      video.srcObject = null
+    }
+  }, [hasRemoteStream])
 
   useEffect(() => {
     if (!hasRemoteStream) return
@@ -859,6 +882,12 @@ export default function ClientPage() {
                     playsInline
                     className={`w-full h-full object-cover ${hasRemoteStream ? 'opacity-100' : 'opacity-0'}`}
                     onClick={requestPointerLock}
+                    onLoadedData={() => {
+                      if (lastRemoteStreamRef.current) setHasRemoteStream(true)
+                    }}
+                    onCanPlay={() => {
+                      if (lastRemoteStreamRef.current) setHasRemoteStream(true)
+                    }}
                   />
                   {!hasRemoteStream ? (
                     <div className={`absolute inset-0 flex flex-col items-center justify-center text-center px-6 ${isDark ? 'bg-[#0f172a]' : 'bg-slate-50'}`}>
