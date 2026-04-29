@@ -262,7 +262,12 @@ app.get("/devices/:deviceId/status", async (req, res) => {
       .select("deviceId isOnline displayName lastSeenAt")
       .lean();
     if (!doc) {
-      return res.json({ ok: true, exists: false, isOnline: false, reason: "not_found" });
+      return res.json({
+        ok: true,
+        exists: false,
+        isOnline: false,
+        reason: "not_found",
+      });
     }
     return res.json({
       ok: true,
@@ -273,7 +278,9 @@ app.get("/devices/:deviceId/status", async (req, res) => {
       lastSeenAt: doc.lastSeenAt || null,
     });
   } catch (error) {
-    return res.status(500).json({ ok: false, message: "Could not check device status" });
+    return res
+      .status(500)
+      .json({ ok: false, message: "Could not check device status" });
   }
 });
 
@@ -281,7 +288,11 @@ app.get("/devices/:deviceId/status", async (req, res) => {
 io.on("connection", (socket) => {
   console.log("🔌 Connected:", socket.id);
 
-  const emitHandshakeError = (targetSocketId, message, code = "handshake_error") => {
+  const emitHandshakeError = (
+    targetSocketId,
+    message,
+    code = "handshake_error",
+  ) => {
     io.to(targetSocketId).emit("handshake-error", {
       code,
       message,
@@ -627,7 +638,9 @@ io.on("connection", (socket) => {
     }
 
     const roomId =
-      hostInfo.roomId || incomingRoomId || crypto.randomUUID().replace(/-/g, "");
+      hostInfo.roomId ||
+      incomingRoomId ||
+      crypto.randomUUID().replace(/-/g, "");
 
     await store.setPendingRequest(socket.id, {
       roomId,
@@ -665,58 +678,72 @@ io.on("connection", (socket) => {
   socket.on(
     "respond-connection-request",
     ({ clientSocketId, approved }, callback) => {
-    if (!ensureDbForSocket()) return;
-    if (!clientSocketId) return;
-    const store = getStore();
-    store
-      .getPendingRequest(clientSocketId)
-      .then(async (request) => {
-        if (!request) {
-          callback?.({ ok: false, message: "Pending request was not found." });
-          return;
-        }
-        if (request.hostSocketId !== socket.id) {
-          callback?.({ ok: false, message: "Request no longer belongs to this host socket." });
-          return;
-        }
-        await store.deletePendingRequest(clientSocketId);
+      if (!ensureDbForSocket()) return;
+      if (!clientSocketId) return;
+      const store = getStore();
+      store
+        .getPendingRequest(clientSocketId)
+        .then(async (request) => {
+          if (!request) {
+            callback?.({
+              ok: false,
+              message: "Pending request was not found.",
+            });
+            return;
+          }
+          if (request.hostSocketId !== socket.id) {
+            callback?.({
+              ok: false,
+              message: "Request no longer belongs to this host socket.",
+            });
+            return;
+          }
+          await store.deletePendingRequest(clientSocketId);
 
-        if (approved) {
-          const roomId =
-            request.roomId || crypto.randomUUID().replace(/-/g, "");
-          await store.setApprovedJoin(clientSocketId, roomId);
-          await store.setApprovedJoin(socket.id, roomId);
+          if (approved) {
+            const roomId =
+              request.roomId || crypto.randomUUID().replace(/-/g, "");
+            await store.setApprovedJoin(clientSocketId, roomId);
+            await store.setApprovedJoin(socket.id, roomId);
 
-          const hostEntry =
-            (await store.getOnlineHost(request.hostDeviceId)) || {};
-          await store.setOnlineHost(request.hostDeviceId, {
-            roomId,
-            displayName: hostEntry.displayName || "Host Device",
-            socketId: request.hostSocketId,
+            const hostEntry =
+              (await store.getOnlineHost(request.hostDeviceId)) || {};
+            await store.setOnlineHost(request.hostDeviceId, {
+              roomId,
+              displayName: hostEntry.displayName || "Host Device",
+              socketId: request.hostSocketId,
+            });
+            await store.setRoomHost(roomId, request.hostDeviceId);
+
+            io.to(socket.id).emit("host-connection-approved", {
+              roomId,
+              clientSocketId,
+              clientDeviceId: request.clientDeviceId,
+            });
+            io.to(clientSocketId).emit("connection-approved", {
+              roomId,
+              hostDeviceId: request.hostDeviceId,
+            });
+            callback?.({
+              ok: true,
+              approved: true,
+              roomId,
+              hostDeviceId: request.hostDeviceId,
+            });
+            return;
+          }
+
+          io.to(clientSocketId).emit("connection-rejected", {
+            message: "Host rejected the connection request.",
           });
-          await store.setRoomHost(roomId, request.hostDeviceId);
-
-          io.to(socket.id).emit("host-connection-approved", {
-            roomId,
-            clientSocketId,
-            clientDeviceId: request.clientDeviceId,
+          callback?.({ ok: true, approved: false });
+        })
+        .catch(() => {
+          callback?.({
+            ok: false,
+            message: "Could not respond to connection request.",
           });
-          io.to(clientSocketId).emit("connection-approved", {
-            roomId,
-            hostDeviceId: request.hostDeviceId,
-          });
-          callback?.({ ok: true, approved: true, roomId, hostDeviceId: request.hostDeviceId });
-          return;
-        }
-
-        io.to(clientSocketId).emit("connection-rejected", {
-          message: "Host rejected the connection request.",
         });
-        callback?.({ ok: true, approved: false });
-      })
-      .catch(() => {
-        callback?.({ ok: false, message: "Could not respond to connection request." });
-      });
     },
   );
 
