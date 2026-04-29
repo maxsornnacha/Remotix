@@ -3,26 +3,44 @@ const toText = (value) => {
   return ''
 }
 
+const toBool = (value) => {
+  const normalized = toText(value).toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
+}
+
+const parseTurnUrls = (value) =>
+  toText(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+
 export const getRtcConfig = () => {
   const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]
 
-  const turnUrl = toText(process.env.NEXT_PUBLIC_TURN_URL)
+  const turnUrls = parseTurnUrls(process.env.NEXT_PUBLIC_TURN_URL)
   const turnUsername = toText(process.env.NEXT_PUBLIC_TURN_USERNAME)
   const turnCredential = toText(process.env.NEXT_PUBLIC_TURN_CREDENTIAL)
   const turnRealm = toText(process.env.NEXT_PUBLIC_TURN_REALM)
+  const forceRelay = toBool(process.env.NEXT_PUBLIC_FORCE_RELAY)
 
-  if (turnUrl && turnUsername && turnCredential) {
+  if (turnUrls.length > 0 && turnUsername && turnCredential) {
     iceServers.push({
-      urls: turnUrl,
+      urls: turnUrls.length === 1 ? turnUrls[0] : turnUrls,
       username: turnUsername,
       credential: turnCredential,
       ...(turnRealm ? { realm: turnRealm } : {}),
     })
   }
 
-  return {
+  const config = {
     iceServers,
   }
+
+  if (forceRelay) {
+    config.iceTransportPolicy = 'relay'
+  }
+
+  return config
 }
 
 const pickSelectedCandidatePair = (statsEntries) => {
