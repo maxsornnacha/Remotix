@@ -513,12 +513,6 @@ export default function HomePage() {
     const requestClientSocketId = incomingRequest.clientSocketId
     const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
     const safeDeviceId = toText(deviceId) || fallbackDeviceId
-    const approvedRoomIdFromRequest = toText(incomingRequest?.roomId)
-
-    if (approved && safeDeviceId && approvedRoomIdFromRequest) {
-      const encodedName = encodeURIComponent(deviceName || 'Host Device')
-      router.push(`/host/${approvedRoomIdFromRequest}?deviceId=${safeDeviceId}&name=${encodedName}`)
-    }
 
     socket.emit('respond-connection-request', {
       clientSocketId: requestClientSocketId,

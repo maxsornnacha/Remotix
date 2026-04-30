@@ -87,6 +87,10 @@ export default function HostPage() {
   const [isSignalingActive, setIsSignalingActive] = useState(false)
   const [isPeerConnected, setIsPeerConnected] = useState(false)
   const [latencyMs, setLatencyMs] = useState(null)
+  const [permissionGate, setPermissionGate] = useState({
+    checking: true,
+    allGranted: false,
+  })
   const videoRef = useRef(null)
   const localStreamRef = useRef(null)
   const blackFrameCanvasRef = useRef(null)
@@ -96,6 +100,8 @@ export default function HostPage() {
   const hasJoinedRoomRef = useRef(false)
   const hasAnnouncedReadyRef = useRef(false)
   const peerHealthTimeoutRef = useRef(null)
+  const autoExitTimeoutRef = useRef(null)
+  const hasTriggeredExitRef = useRef(false)
   const detachRtcDiagnosticsRef = useRef(null)
   const streamHealthIntervalRef = useRef(null)
   const blackFrameHitsRef = useRef(0)
@@ -115,6 +121,26 @@ export default function HostPage() {
     window.clearInterval(streamDebugIntervalRef.current)
     streamDebugIntervalRef.current = null
   }
+
+  useEffect(() => {
+    if (!window.ipc?.invoke) return () => {}
+    window.ipc.invoke('session:keep-awake', { enabled: true }).catch(() => {})
+    return () => {
+      window.ipc.invoke('session:keep-awake', { enabled: false }).catch(() => {})
+    }
+  }, [])
+
+  useEffect(() => {
+    checkPermissions()
+  }, [])
+
+  useEffect(() => {
+    if (permissionGate.checking) return
+    if (!permissionGate.allGranted) {
+      setAllowControl(false)
+      setNotice('Control is disabled until required OS permissions are granted.', 'error')
+    }
+  }, [permissionGate.checking, permissionGate.allGranted])
 
   const startStreamDebugMonitor = (stream) => {
     stopStreamDebugMonitor()
@@ -159,6 +185,22 @@ export default function HostPage() {
     if (text) pushAlert(text, { type: 'error' })
   }
 
+  const checkPermissions = async () => {
+    if (typeof window === 'undefined' || !window.ipc?.invoke) {
+      setPermissionGate({ checking: false, allGranted: false })
+      return
+    }
+    try {
+      const result = await window.ipc.invoke('permissions:status')
+      setPermissionGate({
+        checking: false,
+        allGranted: Boolean(result?.allGranted),
+      })
+    } catch (_error) {
+      setPermissionGate({ checking: false, allGranted: false })
+    }
+  }
+
   const ensurePolicyAccepted = () => {
     if (hasAcceptedPolicy) return true
     setIsPolicyConsentPromptOpen(true)
@@ -189,6 +231,20 @@ export default function HostPage() {
     stopStreamDebugMonitor()
     setIsPeerConnected(false)
     setIsSignalingActive(false)
+  }
+
+  const exitSessionFlow = (reason, delayMs = 1400) => {
+    if (hasTriggeredExitRef.current) return
+    hasTriggeredExitRef.current = true
+    if (peerHealthTimeoutRef.current) {
+      window.clearTimeout(peerHealthTimeoutRef.current)
+      peerHealthTimeoutRef.current = null
+    }
+    setNotice(reason || 'Could not complete host connection flow.', 'error')
+    setSessionEndedReason(reason || 'Could not complete host connection flow.')
+    autoExitTimeoutRef.current = window.setTimeout(() => {
+      router.push('/home')
+    }, delayMs)
   }
 
   const attachStreamToPreview = async (stream) => {
@@ -536,7 +592,7 @@ export default function HostPage() {
       displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Host Device',
     }, (response) => {
       if (!response?.ok) {
-        setNotice(response?.message || 'Could not join host room.', 'error')
+        exitSessionFlow(response?.message || 'Could not join host room.')
         return
       }
       hasJoinedRoomRef.current = true
@@ -576,11 +632,11 @@ export default function HostPage() {
     })
 
     socket.on('join-error', (payload) => {
-      setNotice(payload?.message || 'Could not join host room.', 'error')
+      exitSessionFlow(payload?.message || 'Could not join host room.')
     })
 
     socket.on('handshake-error', (payload) => {
-      setNotice(payload?.message || 'Host connection has an issue.', 'error')
+      exitSessionFlow(payload?.message || 'Host connection has an issue.')
     })
 
     socket.on('incoming-connection-request', (request) => {
@@ -596,7 +652,21 @@ export default function HostPage() {
 
     socket.on('service-unavailable', (payload) => {
       setDbMessage(payload?.message || 'Cannot connect to database. Service is locked.')
-      setNotice('Service is unavailable because the database is not ready.', 'error')
+      exitSessionFlow('Service is unavailable because the database is not ready.')
+    })
+
+    socket.on('disconnect', () => {
+      setNotice('Connection lost. Waiting for network recovery...', 'error')
+      setIsSignalingActive(false)
+    })
+
+    socket.on('connect_error', () => {
+      setNotice('Network error while connecting to signaling server.', 'error')
+    })
+
+    socket.on('reconnect', () => {
+      setNotice('Connection restored. Rejoining host session...', 'success')
+      setIsSignalingActive(true)
     })
 
     socket.on('session-ended', (payload) => {
@@ -643,6 +713,9 @@ export default function HostPage() {
       if (peerHealthTimeoutRef.current) {
         window.clearTimeout(peerHealthTimeoutRef.current)
       }
+      if (autoExitTimeoutRef.current) {
+        window.clearTimeout(autoExitTimeoutRef.current)
+      }
       socket.off('start-handshake');
       socket.off('signal');
       socket.off('join-error');
@@ -656,10 +729,38 @@ export default function HostPage() {
       socket.off('key-up');
       socket.off('incoming-connection-request');
       socket.off('service-unavailable');
+      socket.off('disconnect');
+      socket.off('connect_error');
+      socket.off('reconnect');
       socket.off('session-ended');
       socket.off('client-network-quality');
     }
   }, [roomId, allowControl, router, hasAcceptedPolicy])
+
+  useEffect(() => {
+    if (!roomId || isHostDetailReady) return
+    const timeoutId = window.setTimeout(() => {
+      exitSessionFlow('Connection timed out. Returning to home.')
+    }, 25000)
+    return () => window.clearTimeout(timeoutId)
+  }, [roomId, isHostDetailReady])
+
+  useEffect(() => {
+    const leaveCurrentSession = () => {
+      const activeRoomId = toText(roomId)
+      if (!activeRoomId) return
+      socket.emit('leave-session', {
+        roomId: activeRoomId,
+        message: 'Host left the session.',
+      })
+    }
+    window.addEventListener('beforeunload', leaveCurrentSession)
+    window.addEventListener('pagehide', leaveCurrentSession)
+    return () => {
+      window.removeEventListener('beforeunload', leaveCurrentSession)
+      window.removeEventListener('pagehide', leaveCurrentSession)
+    }
+  }, [roomId])
 
   useEffect(() => {
     if (!deviceId) return
@@ -853,6 +954,10 @@ export default function HostPage() {
   useEffect(() => {
     const handleShortcut = (event) => {
       if (event.key.toLowerCase() === 'c') {
+        if (!permissionGate.allGranted) {
+          setNotice('Control is blocked until required OS permissions are granted.', 'error')
+          return
+        }
         const next = !allowControl
         setAllowControl(next)
         setNotice(next ? 'Remote control enabled (shortcut C).' : 'Remote control disabled (shortcut C).')
@@ -861,7 +966,7 @@ export default function HostPage() {
 
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [allowControl])
+  }, [allowControl, permissionGate.allGranted])
 
   const handleDisconnect = () => {
     isManualDisconnectRef.current = true
@@ -1041,10 +1146,15 @@ export default function HostPage() {
                   </button>
                   <button
                     onClick={() => {
+                      if (!permissionGate.allGranted) {
+                        setNotice('Control is blocked until required OS permissions are granted.', 'error')
+                        return
+                      }
                       const next = !allowControl
                       setAllowControl(next)
                       setNotice(next ? 'Remote control is enabled.' : 'Remote control is disabled.')
                     }}
+                    disabled={permissionGate.checking || !permissionGate.allGranted}
                     className={`col-span-2 px-3 py-2 rounded-md text-sm transition ${allowControl ? 'bg-red-700 hover:bg-red-600' : 'bg-red-600 hover:bg-red-500'}`}
                   >
                     {allowControl ? 'Control On' : 'Enable Ctrl'}

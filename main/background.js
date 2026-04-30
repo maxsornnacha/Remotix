@@ -9,6 +9,7 @@ import {
   systemPreferences,
   shell,
   screen,
+  powerSaveBlocker,
 } from "electron";
 import serve from "electron-serve";
 import { createWindow } from "./helpers";
@@ -17,6 +18,8 @@ const isProd = process.env.NODE_ENV === "production";
 let preferredScreenSourceId = "";
 let mouseDeltaBuffer = { x: 0, y: 0 };
 let mouseFlushTimer = null;
+let keepAwakeRequestCount = 0;
+let keepAwakeBlockerId = null;
 
 const buttonFromIndex = (index) => {
   if (index === 1) return Button.MIDDLE;
@@ -252,6 +255,35 @@ ipcMain.handle("desktop:screen-sources", async () => {
 ipcMain.handle("desktop:set-selected-source", async (_event, payload = {}) => {
   preferredScreenSourceId = String(payload?.sourceId || "").trim();
   return { ok: true, sourceId: preferredScreenSourceId };
+});
+
+ipcMain.handle("session:keep-awake", async (_event, payload = {}) => {
+  const enabled = Boolean(payload?.enabled);
+  if (enabled) {
+    keepAwakeRequestCount += 1;
+    if (
+      keepAwakeRequestCount > 0 &&
+      (!keepAwakeBlockerId || !powerSaveBlocker.isStarted(keepAwakeBlockerId))
+    ) {
+      keepAwakeBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    }
+  } else {
+    keepAwakeRequestCount = Math.max(0, keepAwakeRequestCount - 1);
+    if (
+      keepAwakeRequestCount === 0 &&
+      keepAwakeBlockerId &&
+      powerSaveBlocker.isStarted(keepAwakeBlockerId)
+    ) {
+      powerSaveBlocker.stop(keepAwakeBlockerId);
+      keepAwakeBlockerId = null;
+    }
+  }
+
+  return {
+    ok: true,
+    enabled: Boolean(keepAwakeBlockerId),
+    activeRequests: keepAwakeRequestCount,
+  };
 });
 
 ipcMain.on("message", async (event, arg) => {

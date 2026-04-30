@@ -66,7 +66,10 @@ export default function ClientPage() {
   const joinedRoomRef = useRef('')
   const pendingSignalsRef = useRef([])
   const handshakeRetryTimeoutRef = useRef(null)
+  const handshakeRetryCountRef = useRef(0)
   const streamTimeoutRef = useRef(null)
+  const autoExitTimeoutRef = useRef(null)
+  const hasTriggeredExitRef = useRef(false)
   const detachRtcDiagnosticsRef = useRef(null)
   const lastRemoteStreamRef = useRef(null)
   const lastNotifiedMessageRef = useRef('')
@@ -218,6 +221,24 @@ export default function ClientPage() {
     setIsSignalingActive(false)
   }
 
+  const exitSessionFlow = (reason, delayMs = 1400) => {
+    if (hasTriggeredExitRef.current) return
+    hasTriggeredExitRef.current = true
+    if (handshakeRetryTimeoutRef.current) {
+      window.clearTimeout(handshakeRetryTimeoutRef.current)
+      handshakeRetryTimeoutRef.current = null
+    }
+    if (streamTimeoutRef.current) {
+      window.clearTimeout(streamTimeoutRef.current)
+      streamTimeoutRef.current = null
+    }
+    setStatus(reason || 'Could not complete connection. Returning to home.', 'error')
+    setSessionEndedReason(reason || 'Could not complete connection. Returning to home.')
+    autoExitTimeoutRef.current = window.setTimeout(() => {
+      router.push('/home')
+    }, delayMs)
+  }
+
   const togglePointerLock = () => {
     if (document.pointerLockElement === videoRef.current) {
       document.exitPointerLock()
@@ -225,6 +246,14 @@ export default function ClientPage() {
     }
     requestPointerLock()
   }
+
+  useEffect(() => {
+    if (!window.ipc?.invoke) return () => {}
+    window.ipc.invoke('session:keep-awake', { enabled: true }).catch(() => {})
+    return () => {
+      window.ipc.invoke('session:keep-awake', { enabled: false }).catch(() => {})
+    }
+  }, [])
 
   useEffect(() => {
     const handlePointerLockChange = () => {
@@ -328,7 +357,7 @@ export default function ClientPage() {
 
     peer.on('close', () => {
       setIsPeerConnected(false)
-      showSessionEnded('Host left the session.')
+      reconnectSession()
     })
 
     peer.on('connect', () => {
@@ -342,7 +371,8 @@ export default function ClientPage() {
     }
     streamTimeoutRef.current = window.setTimeout(() => {
       if (!videoRef.current?.srcObject) {
-        setStatus('Video took too long to arrive. Try Reconnect.', 'error')
+        setStatus('Video took too long to arrive. Reconnecting automatically...', 'error')
+        reconnectSession()
       }
     }, 18000)
 
@@ -358,10 +388,15 @@ export default function ClientPage() {
     if (!targetRoomId) return
     socket.emit('client-handshake-ready', { roomId: targetRoomId }, (response) => {
       if (!response?.ok) {
-        setStatus(response?.message || 'Could not mark client handshake ready.', 'error')
+        exitSessionFlow(response?.message || 'Could not mark client handshake ready.')
         return
       }
       if (response?.pendingHost) {
+        handshakeRetryCountRef.current += 1
+        if (handshakeRetryCountRef.current > 8) {
+          exitSessionFlow('Host is not ready for this room. Returning to home.')
+          return
+        }
         if (handshakeRetryTimeoutRef.current) {
           window.clearTimeout(handshakeRetryTimeoutRef.current)
         }
@@ -371,6 +406,7 @@ export default function ClientPage() {
         setStatus(response?.message || 'Waiting for host readiness...')
         return
       }
+      handshakeRetryCountRef.current = 0
       console.log('[client][handshake] client-ready acknowledged', response)
       setStatus('Joined room. Waiting for host to start connection...')
     })
@@ -432,7 +468,7 @@ export default function ClientPage() {
         },
         (response) => {
           if (!response?.ok) {
-            setStatus(response?.message || 'Could not send request to host.', 'error')
+            exitSessionFlow(response?.message || 'Could not send request to host.')
             return
           }
           setStatus(response.message)
@@ -459,25 +495,41 @@ export default function ClientPage() {
     })
 
     socket.on('connection-rejected', (payload) => {
-      setStatus(payload?.message || 'Connection request was rejected by host.', 'error')
+      exitSessionFlow(payload?.message || 'Connection request was rejected by host.')
     })
 
     socket.on('join-denied', (payload) => {
-      setStatus(payload?.message || 'Join denied by host policy.', 'error')
+      exitSessionFlow(payload?.message || 'Join denied by host policy.')
     })
 
     socket.on('service-unavailable', (payload) => {
       const message = payload?.message || 'Cannot connect to database. Service is locked.'
       setDbMessage(message)
-      setStatus(message, 'error')
+      exitSessionFlow(message)
     })
 
     socket.on('join-error', (payload) => {
-      setStatus(payload?.message || 'Could not join room.', 'error')
+      exitSessionFlow(payload?.message || 'Could not join room.')
     })
 
     socket.on('handshake-error', (payload) => {
-      setStatus(payload?.message || 'Handshake error on client side.', 'error')
+      exitSessionFlow(payload?.message || 'Handshake error on client side.')
+    })
+
+    socket.on('disconnect', () => {
+      setStatus('Connection lost. Attempting automatic recovery...', 'error')
+      setIsSignalingActive(false)
+      reconnectSession()
+    })
+
+    socket.on('connect_error', () => {
+      setStatus('Network error while connecting to signaling server.', 'error')
+    })
+
+    socket.on('reconnect', () => {
+      setStatus('Connection restored. Rejoining session...', 'success')
+      setIsSignalingActive(true)
+      reconnectSession()
     })
 
     socket.on('start-handshake', (payload) => {
@@ -513,6 +565,9 @@ export default function ClientPage() {
       if (streamTimeoutRef.current) {
         window.clearTimeout(streamTimeoutRef.current)
       }
+      if (autoExitTimeoutRef.current) {
+        window.clearTimeout(autoExitTimeoutRef.current)
+      }
       socket.off('connect', handleJoin);
       socket.off('peer-joined');
       socket.off('signal');
@@ -522,10 +577,38 @@ export default function ClientPage() {
       socket.off('service-unavailable');
       socket.off('join-error');
       socket.off('handshake-error');
+      socket.off('disconnect');
+      socket.off('connect_error');
+      socket.off('reconnect');
       socket.off('start-handshake');
       socket.off('session-ended');
     };
     }, [roomId, router, deviceId, name, targetHostDeviceId, preapproved]);
+
+  useEffect(() => {
+    if (!roomId || isClientDetailReady) return
+    const timeoutId = window.setTimeout(() => {
+      exitSessionFlow('Connection timed out. Returning to home.')
+    }, 25000)
+    return () => window.clearTimeout(timeoutId)
+  }, [roomId, isClientDetailReady])
+
+  useEffect(() => {
+    const leaveCurrentSession = () => {
+      const activeRoomId = toText(approvedRoomId || joinedRoomRef.current || roomId)
+      if (!activeRoomId) return
+      socket.emit('leave-session', {
+        roomId: activeRoomId,
+        message: 'Client left the session.',
+      })
+    }
+    window.addEventListener('beforeunload', leaveCurrentSession)
+    window.addEventListener('pagehide', leaveCurrentSession)
+    return () => {
+      window.removeEventListener('beforeunload', leaveCurrentSession)
+      window.removeEventListener('pagehide', leaveCurrentSession)
+    }
+  }, [approvedRoomId, roomId])
   
 
   // Send remote input events
@@ -935,12 +1018,6 @@ export default function ClientPage() {
                     className={`col-span-2 px-3 py-2 rounded-md text-sm transition disabled:opacity-50 disabled:cursor-not-allowed ${isPointerLocked ? 'bg-red-700 hover:bg-red-600' : 'bg-red-600 hover:bg-red-500'}`}
                   >
                     {isPointerLocked ? 'Exit Control' : 'Enter Control'}
-                  </button>
-                  <button
-                    onClick={reconnectSession}
-                    className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-[#3a404d] hover:bg-[#4a5160] text-white"
-                  >
-                    Reconnect
                   </button>
                   <button
                     onClick={toggleFullscreen}
