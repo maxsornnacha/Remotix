@@ -23,6 +23,7 @@ const RESUME_ROTATION_TTL_MS = Number(
 const RESUME_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RESUME_RATE_LIMIT_MAX_ATTEMPTS = 12;
 const RESUME_RATE_LIMIT_COOLDOWN_MS = 120 * 1000;
+const RESUME_RATE_LIMIT_SWEEP_MS = 60 * 1000;
 let runtimeStore = null;
 const roomHandshakeState = new Map();
 const resumePreflightRateState = new Map();
@@ -75,6 +76,18 @@ setInterval(async () => {
     { $set: { isOnline: false } },
   );
 }, DEVICE_SWEEP_INTERVAL_MS).unref();
+
+setInterval(() => {
+  const nowMs = Date.now();
+  for (const [key, state] of resumePreflightRateState.entries()) {
+    const inCooldown = state.cooldownUntil > nowMs;
+    const windowActive =
+      nowMs - state.windowStartedAt < RESUME_RATE_LIMIT_WINDOW_MS;
+    if (!inCooldown && !windowActive) {
+      resumePreflightRateState.delete(key);
+    }
+  }
+}, RESUME_RATE_LIMIT_SWEEP_MS).unref();
 
 const requireDb = (res) => {
   if (isDbConnected()) return true;
@@ -269,7 +282,7 @@ app.post("/sessions/resume/preflight", async (req, res) => {
       latencyMs: Date.now() - startedAt,
       extra: retryAfterSec > 0 ? { retryAfterSec } : undefined,
     });
-    return fail(res, status, message, reasonCode, requestId);
+    return fail(res, status, message, reasonCode, requestId, extra);
   };
 
   if (!isDbConnected()) {
@@ -280,7 +293,8 @@ app.post("/sessions/resume/preflight", async (req, res) => {
     );
   }
 
-  const rateKey = `${ip}|${deviceId || tokenId || "unknown"}`;
+  const safeDeviceId = text(deviceId);
+  const rateKey = safeDeviceId ? `${ip}|${safeDeviceId}` : `${ip}|anonymous`;
   const rateCheck = consumeResumeRateLimit(rateKey, Date.now());
   if (rateCheck.limited) {
     return reject(429, "Too many preflight attempts. Please retry later.", "RATE_LIMITED", {
