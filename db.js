@@ -48,6 +48,37 @@ const resumeTokenSchema = new mongoose.Schema(
 const ResumeToken =
   mongoose.models.ResumeToken || mongoose.model('ResumeToken', resumeTokenSchema);
 
+const hostAuditEventSchema = new mongoose.Schema(
+  {
+    externalId: { type: String, default: '' },
+    event: { type: String, required: true, index: true },
+    requestId: { type: String, default: '', index: true },
+    policyMode: { type: String, default: '' },
+    clientDeviceId: { type: String, default: '', index: true },
+    clientDisplayName: { type: String, default: '' },
+    clientSocketId: { type: String, default: '' },
+    reason: { type: String, default: '' },
+    riskReasons: [{ type: String }],
+    approved: { type: Boolean, default: null },
+    roomId: { type: String, required: true, index: true },
+    at: { type: Date, required: true, index: true },
+    receivedAt: { type: Date, default: Date.now, index: true },
+    ip: { type: String, default: '' },
+    userAgent: { type: String, default: '' },
+    raw: { type: mongoose.Schema.Types.Mixed, default: null },
+  },
+  { timestamps: true },
+);
+
+hostAuditEventSchema.index({ roomId: 1, at: -1 });
+hostAuditEventSchema.index({ requestId: 1 });
+hostAuditEventSchema.index({ clientDeviceId: 1, at: -1 });
+hostAuditEventSchema.index({ event: 1, at: -1 });
+
+const HostAuditEvent =
+  mongoose.models.HostAuditEvent ||
+  mongoose.model('HostAuditEvent', hostAuditEventSchema);
+
 const connectDb = async () => {
   const uri = process.env.MONGODB_URI;
   if (!uri) {
@@ -71,6 +102,7 @@ module.exports = {
   Pairing,
   Device,
   ResumeToken,
+  HostAuditEvent,
   connectDb,
   isDbConnected,
 };

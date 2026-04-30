@@ -6,7 +6,14 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const { Pairing, Device, ResumeToken, connectDb, isDbConnected } = require("./db");
+const {
+  Pairing,
+  Device,
+  ResumeToken,
+  HostAuditEvent,
+  connectDb,
+  isDbConnected,
+} = require("./db");
 const { createRuntimeStore } = require("./runtimeStore");
 
 const app = express();
@@ -24,9 +31,13 @@ const RESUME_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RESUME_RATE_LIMIT_MAX_ATTEMPTS = 12;
 const RESUME_RATE_LIMIT_COOLDOWN_MS = 120 * 1000;
 const RESUME_RATE_LIMIT_SWEEP_MS = 60 * 1000;
+const HOST_AUDIT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const HOST_AUDIT_RATE_LIMIT_MAX_ATTEMPTS = 120;
+const HOST_AUDIT_RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
 let runtimeStore = null;
 const roomHandshakeState = new Map();
 const resumePreflightRateState = new Map();
+const hostAuditRateState = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -85,6 +96,18 @@ setInterval(() => {
       nowMs - state.windowStartedAt < RESUME_RATE_LIMIT_WINDOW_MS;
     if (!inCooldown && !windowActive) {
       resumePreflightRateState.delete(key);
+    }
+  }
+}, RESUME_RATE_LIMIT_SWEEP_MS).unref();
+
+setInterval(() => {
+  const nowMs = Date.now();
+  for (const [key, state] of hostAuditRateState.entries()) {
+    const inCooldown = state.cooldownUntil > nowMs;
+    const windowActive =
+      nowMs - state.windowStartedAt < HOST_AUDIT_RATE_LIMIT_WINDOW_MS;
+    if (!inCooldown && !windowActive) {
+      hostAuditRateState.delete(key);
     }
   }
 }, RESUME_RATE_LIMIT_SWEEP_MS).unref();
@@ -205,6 +228,67 @@ const isTransactionUnsupportedError = (error) => {
     msg.includes("transaction numbers are only allowed") ||
     msg.includes("transactions are not supported")
   );
+};
+
+const clamp = (value, maxLen) => text(value).slice(0, maxLen);
+
+const HOST_AUDIT_ALLOWED_EVENTS = new Set([
+  "request_received",
+  "request_auto_approved",
+  "request_risk_confirmation_required",
+  "request_approved",
+  "request_rejected",
+  "request_respond_failed",
+]);
+
+const consumeGenericRateLimit = (
+  storeMap,
+  rateKey,
+  nowMs,
+  windowMs,
+  maxAttempts,
+  cooldownMs,
+) => {
+  const existing = storeMap.get(rateKey) || {
+    windowStartedAt: nowMs,
+    attempts: 0,
+    cooldownUntil: 0,
+  };
+  if (existing.cooldownUntil > 0 && nowMs >= existing.cooldownUntil) {
+    existing.cooldownUntil = 0;
+    existing.windowStartedAt = nowMs;
+    existing.attempts = 0;
+  }
+  if (nowMs - existing.windowStartedAt >= windowMs) {
+    existing.windowStartedAt = nowMs;
+    existing.attempts = 0;
+  }
+  if (existing.cooldownUntil > nowMs) {
+    storeMap.set(rateKey, existing);
+    return {
+      limited: true,
+      retryAfterSec: Math.max(
+        1,
+        Math.ceil((existing.cooldownUntil - nowMs) / 1000),
+      ),
+    };
+  }
+
+  existing.attempts += 1;
+  if (existing.attempts > maxAttempts) {
+    existing.cooldownUntil = nowMs + cooldownMs;
+    storeMap.set(rateKey, existing);
+    return {
+      limited: true,
+      retryAfterSec: Math.max(
+        1,
+        Math.ceil((existing.cooldownUntil - nowMs) / 1000),
+      ),
+    };
+  }
+
+  storeMap.set(rateKey, existing);
+  return { limited: false, retryAfterSec: 0 };
 };
 
 const isTokenConsumed = (tokenDoc) => {
@@ -553,6 +637,135 @@ app.post("/sessions/resume/preflight", async (req, res) => {
     nextExpiresAt: nextExpiresAt.getTime(),
     requestId,
   });
+});
+
+app.post("/audit/host-connection-events", async (req, res) => {
+  const startedAt = Date.now();
+  const requestId = ensureRequestId(req, res);
+  const ip = getClientIp(req);
+  const payload = req.body || {};
+  const safeRoomId = clamp(payload.roomId, 128);
+  const safeEvent = clamp(payload.event, 96);
+  const safeClientDeviceId = clamp(payload.clientDeviceId, 128);
+
+  const reject = (status, message, reasonCode, extra = {}) => {
+    const retryAfterSec = Number(extra.retryAfterSec || 0);
+    if (reasonCode === "RATE_LIMITED" && retryAfterSec > 0) {
+      res.setHeader("Retry-After", String(retryAfterSec));
+    }
+    console.log(
+      JSON.stringify({
+        event:
+          reasonCode === "RATE_LIMITED"
+            ? "host_audit_event_rate_limited"
+            : "host_audit_event_rejected",
+        requestId,
+        httpStatus: status,
+        reasonCode,
+        eventName: safeEvent,
+        roomId: safeRoomId,
+        clientDeviceId: safeClientDeviceId,
+        latencyMs: Date.now() - startedAt,
+      }),
+    );
+    return fail(res, status, message, reasonCode, requestId, extra);
+  };
+
+  if (!isDbConnected()) {
+    return reject(
+      503,
+      "Audit service unavailable.",
+      "UPSTREAM_UNAVAILABLE",
+    );
+  }
+
+  const rateKey = `${ip}|${safeRoomId || "unknown-room"}`;
+  const rateCheck = consumeGenericRateLimit(
+    hostAuditRateState,
+    rateKey,
+    Date.now(),
+    HOST_AUDIT_RATE_LIMIT_WINDOW_MS,
+    HOST_AUDIT_RATE_LIMIT_MAX_ATTEMPTS,
+    HOST_AUDIT_RATE_LIMIT_COOLDOWN_MS,
+  );
+  if (rateCheck.limited) {
+    return reject(429, "Too many audit events.", "RATE_LIMITED", {
+      retryAfterSec: rateCheck.retryAfterSec,
+    });
+  }
+
+  if (!safeEvent || !safeRoomId || !payload.at) {
+    return reject(400, "Invalid payload", "INVALID_REQUEST");
+  }
+  if (!HOST_AUDIT_ALLOWED_EVENTS.has(safeEvent)) {
+    return reject(400, "Invalid payload", "INVALID_REQUEST");
+  }
+
+  const parsedAt = new Date(payload.at);
+  const eventAt = Number.isNaN(parsedAt.getTime()) ? new Date() : parsedAt;
+  const riskReasons = Array.isArray(payload.riskReasons)
+    ? payload.riskReasons.map((item) => clamp(item, 256)).filter(Boolean)
+    : [];
+
+  const userAgent = clamp(req.headers["user-agent"], 512);
+  const doc = {
+    externalId: clamp(payload.id, 128),
+    event: safeEvent,
+    requestId: clamp(payload.requestId, 128),
+    policyMode: clamp(payload.policyMode, 64),
+    clientDeviceId: safeClientDeviceId,
+    clientDisplayName: clamp(payload.clientDisplayName, 256),
+    clientSocketId: clamp(payload.clientSocketId, 128),
+    reason: clamp(payload.reason, 512),
+    riskReasons,
+    approved:
+      typeof payload.approved === "boolean" ? payload.approved : null,
+    roomId: safeRoomId,
+    at: eventAt,
+    receivedAt: new Date(),
+    ip: clamp(ip, 96),
+    userAgent,
+    raw: payload,
+  };
+
+  try {
+    await HostAuditEvent.create(doc);
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        event: "host_audit_event_error",
+        requestId,
+        httpStatus: 503,
+        reasonCode: "UPSTREAM_UNAVAILABLE",
+        eventName: safeEvent,
+        roomId: safeRoomId,
+        clientDeviceId: safeClientDeviceId,
+        latencyMs: Date.now() - startedAt,
+        errorMessage: clamp(error?.message, 256),
+      }),
+    );
+    return fail(
+      res,
+      503,
+      "Audit service unavailable.",
+      "UPSTREAM_UNAVAILABLE",
+      requestId,
+    );
+  }
+
+  console.log(
+    JSON.stringify({
+      event: "host_audit_event_ingested",
+      requestId,
+      httpStatus: 200,
+      reasonCode: "OK",
+      eventName: safeEvent,
+      roomId: safeRoomId,
+      clientDeviceId: safeClientDeviceId,
+      latencyMs: Date.now() - startedAt,
+    }),
+  );
+  return res.status(200).json({ ok: true, requestId });
 });
 
 app.get("/pairings/:deviceId", async (req, res) => {
