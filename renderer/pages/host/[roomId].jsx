@@ -71,7 +71,7 @@ export default function HostPage() {
   const router = useRouter()
   const { roomId, deviceId, name } = router.query
 
-  const [allowControl, setAllowControl] = useState(false)
+  const [allowControl, setAllowControl] = useState(true)
   const [sessionNotice, setSessionNotice] = useState('')
   const [isSharing, setIsSharing] = useState(false)
   const [isPreparingShare, setIsPreparingShare] = useState(false)

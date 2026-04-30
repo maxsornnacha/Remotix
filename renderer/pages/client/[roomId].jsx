@@ -48,6 +48,7 @@ export default function ClientPage() {
   const { roomId, deviceId, name, targetHostDeviceId, preapproved } = router.query
 
   const videoRef = useRef(null)
+  const remoteViewportRef = useRef(null)
   const blackFrameCanvasRef = useRef(null)
   const [sessionStatus, setSessionStatus] = useState('Connecting to host...')
   const [isPointerLocked, setIsPointerLocked] = useState(false)
@@ -63,6 +64,7 @@ export default function ClientPage() {
   const hostMetaRef = useRef(null)
   const [approvedRoomId, setApprovedRoomId] = useState('')
   const [dbUnavailableMessage, setDbUnavailableMessage] = useState('')
+  const [remoteStreamRevision, setRemoteStreamRevision] = useState(0)
   const joinedRoomRef = useRef('')
   const pendingSignalsRef = useRef([])
   const handshakeRetryTimeoutRef = useRef(null)
@@ -119,13 +121,13 @@ export default function ClientPage() {
 
   const attachRemoteStream = async (stream) => {
     if (!videoRef.current) return false
+    lastRemoteStreamRef.current = stream
     const videoTracks = stream?.getVideoTracks?.() || []
     const hasLiveVideoTrack = videoTracks.some((track) => track?.readyState === 'live')
     if (!hasLiveVideoTrack) {
-      console.log('[client][stream] skip attach: no live video track yet')
+      console.log('[client][stream] no live video track yet, waiting for track readiness')
       return false
     }
-    lastRemoteStreamRef.current = stream
     videoRef.current.srcObject = stream
     try {
       await videoRef.current.play()
@@ -192,14 +194,14 @@ export default function ClientPage() {
   };
 
   const toggleFullscreen = async () => {
-    const video = videoRef.current
-    if (!video) return
+    const viewport = remoteViewportRef.current
+    if (!viewport) return
     try {
-      if (document.fullscreenElement === video) {
+      if (document.fullscreenElement) {
         await document.exitFullscreen()
         return
       }
-      await video.requestFullscreen()
+      await viewport.requestFullscreen()
     } catch (_error) {
       setStatus('Could not toggle fullscreen mode.', 'error')
     }
@@ -282,7 +284,7 @@ export default function ClientPage() {
 
   useEffect(() => {
     const onFullscreenChange = () => {
-      setIsFullscreen(document.fullscreenElement === videoRef.current)
+      setIsFullscreen(Boolean(document.fullscreenElement))
     }
     document.addEventListener('fullscreenchange', onFullscreenChange)
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
@@ -313,7 +315,11 @@ export default function ClientPage() {
     })
 
     peer.on('stream', (stream) => {
-      setHasRemoteStream(false)
+      // Mark stream presence immediately so frame-health monitors can run,
+      // even when first decoded frame arrives a bit later.
+      setHasRemoteStream(true)
+      lastRemoteStreamRef.current = stream
+      setRemoteStreamRevision((current) => current + 1)
       if (streamTimeoutRef.current) {
         window.clearTimeout(streamTimeoutRef.current)
         streamTimeoutRef.current = null
@@ -330,6 +336,7 @@ export default function ClientPage() {
       if (videoTrack) {
         videoTrack.onunmute = () => {
           console.log('[client][stream] video track unmuted, retry attach')
+          setRemoteStreamRevision((current) => current + 1)
           void attachRemoteStream(stream).then((ok) => {
             if (ok) setHasRemoteStream(true)
           })
@@ -341,6 +348,7 @@ export default function ClientPage() {
           setStatus('Live stream ready. Click on video to control.', 'success')
           return
         }
+        setHasRemoteStream(true)
         setStatus('Stream received. Waiting for first video frames...', 'info')
       })
 
@@ -353,6 +361,12 @@ export default function ClientPage() {
           roomId: approvedRoomId || roomId,
         }).catch(() => {})
       }
+    })
+
+    peer.on('track', (_track, stream) => {
+      if (!stream) return
+      lastRemoteStreamRef.current = stream
+      setRemoteStreamRevision((current) => current + 1)
     })
 
     peer.on('error', (error) => {
@@ -722,6 +736,27 @@ export default function ClientPage() {
   }, [roomId, approvedRoomId, controlProfile])
 
   useEffect(() => {
+    if (!lastRemoteStreamRef.current || !videoRef.current) return
+    let retryCount = 0
+    let retryTimer = null
+    const tryAttach = () => {
+      void attachRemoteStream(lastRemoteStreamRef.current).then((ok) => {
+        if (ok) {
+          setHasRemoteStream(true)
+          return
+        }
+        if (retryCount >= 8) return
+        retryCount += 1
+        retryTimer = window.setTimeout(tryAttach, 250)
+      })
+    }
+    tryAttach()
+    return () => {
+      if (retryTimer) window.clearTimeout(retryTimer)
+    }
+  }, [remoteStreamRevision])
+
+  useEffect(() => {
     if (!hasRemoteStream) {
       if (videoRef.current && !lastRemoteStreamRef.current) {
         videoRef.current.pause()
@@ -1014,8 +1049,11 @@ export default function ClientPage() {
 
         <div className="min-h-0 overflow-hidden p-5">
           {isClientDetailReady ? (
-            <div className="h-full grid lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
-            <section className={`rounded-xl border overflow-hidden flex flex-col ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
+            <div className={`h-full grid ${isFullscreen ? 'grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_340px]'} gap-4`}>
+            <section
+              ref={remoteViewportRef}
+              className={`rounded-xl border overflow-hidden flex flex-col ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}
+            >
               <div className={`px-4 py-2.5 text-xs border-b flex items-center justify-between ${isDark ? 'border-slate-700 text-slate-300 bg-[#202531]' : 'border-slate-200 text-slate-600 bg-slate-50'}`}>
                 <span>Host Screen</span>
                 <span className="font-mono">{hasRemoteStream ? 'live' : 'waiting'}</span>
@@ -1027,7 +1065,7 @@ export default function ClientPage() {
                     autoPlay
                     muted
                     playsInline
-                    className={`w-full h-full object-cover ${hasRemoteStream ? 'opacity-100' : 'opacity-0'}`}
+                    className={`w-full h-full object-contain ${hasRemoteStream ? 'opacity-100' : 'opacity-0'}`}
                     onClick={requestPointerLock}
                     onLoadedData={() => {
                       if (lastRemoteStreamRef.current) setHasRemoteStream(true)
@@ -1049,6 +1087,7 @@ export default function ClientPage() {
               </div>
             </section>
 
+            {!isFullscreen ? (
             <aside className={`rounded-xl border p-3 overflow-y-auto space-y-3 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-slate-50'}`}>
               <div className={`rounded-lg border p-3 ${isDark ? 'border-slate-600 bg-[#202531]' : 'border-slate-300 bg-white'}`}>
                 <p className={`text-xs uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Session Controls</p>
@@ -1103,6 +1142,7 @@ export default function ClientPage() {
                 Tip: Keep control mode off when you are only observing the host screen.
               </div>
             </aside>
+            ) : null}
             </div>
           ) : (
             <div className={`h-full rounded-2xl border backdrop-blur-sm flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]/90' : 'border-slate-200 bg-white/95'}`}>
