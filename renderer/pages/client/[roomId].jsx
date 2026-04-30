@@ -1110,8 +1110,8 @@ export default function ClientPage() {
                 <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-blue-400' : 'border-slate-300 border-t-blue-500'}`} />
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-blue-500/30' : 'bg-blue-400/40'}`} />
               </div>
-              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>กำลังเข้าถึงอีกเครื่อง...</p>
-              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>กำลังเตรียมการเชื่อมต่ออัตโนมัติ โปรดรอสักครู่</p>
+              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Connecting to remote device...</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Preparing secure session automatically. Please wait a moment.</p>
             </div>
           )}
         </div>

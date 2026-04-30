@@ -738,14 +738,6 @@ export default function HostPage() {
   }, [roomId, allowControl, router, hasAcceptedPolicy])
 
   useEffect(() => {
-    if (!roomId || isHostDetailReady) return
-    const timeoutId = window.setTimeout(() => {
-      exitSessionFlow('Connection timed out. Returning to home.')
-    }, 25000)
-    return () => window.clearTimeout(timeoutId)
-  }, [roomId, isHostDetailReady])
-
-  useEffect(() => {
     const leaveCurrentSession = () => {
       const activeRoomId = toText(roomId)
       if (!activeRoomId) return
@@ -1038,6 +1030,14 @@ export default function HostPage() {
   const requiredHostSteps = hostConnectionSteps.filter((step) => step.key !== 'peer')
   const isHostDetailReady = requiredHostSteps.every((step) => step.done)
 
+  useEffect(() => {
+    if (!roomId || isHostDetailReady) return
+    const timeoutId = window.setTimeout(() => {
+      exitSessionFlow('Connection timed out. Returning to home.')
+    }, 25000)
+    return () => window.clearTimeout(timeoutId)
+  }, [roomId, isHostDetailReady])
+
   if (sessionEndedReason) {
     return (
       <div className={`min-h-screen flex items-center justify-center p-6 ${isDark ? 'bg-[#111318] text-white' : 'bg-slate-100 text-slate-900'}`}>
@@ -1214,8 +1214,8 @@ export default function HostPage() {
                 <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-red-400' : 'border-slate-300 border-t-red-500'}`} />
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-red-500/30' : 'bg-red-400/40'}`} />
               </div>
-              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>กำลังเข้าถึงอีกเครื่อง...</p>
-              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>กำลังเตรียมการเชื่อมต่ออัตโนมัติ โปรดรอสักครู่</p>
+              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Connecting to remote device...</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Preparing secure session automatically. Please wait a moment.</p>
             </div>
           )}
         </div>
