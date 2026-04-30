@@ -20,8 +20,12 @@ const DEVICE_SWEEP_INTERVAL_MS = 5000;
 const RESUME_ROTATION_TTL_MS = Number(
   process.env.RESUME_ROTATION_TTL_MS || 15 * 60 * 1000,
 );
+const RESUME_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RESUME_RATE_LIMIT_MAX_ATTEMPTS = 12;
+const RESUME_RATE_LIMIT_COOLDOWN_MS = 120 * 1000;
 let runtimeStore = null;
 const roomHandshakeState = new Map();
+const resumePreflightRateState = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -85,12 +89,110 @@ const text = (value) =>
     ? String(value).trim()
     : "";
 
-const fail = (res, status, message, reasonCode) =>
+const fail = (res, status, message, reasonCode, requestId, extra = {}) =>
   res.status(status).json({
     ok: false,
     message,
     reasonCode,
+    ...(requestId ? { requestId } : {}),
+    ...extra,
   });
+
+const getClientIp = (req) => {
+  const forwarded = text(req.headers["x-forwarded-for"]);
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return text(req.ip || req.socket?.remoteAddress || "unknown");
+};
+
+const ensureRequestId = (req, res) => {
+  const incoming = text(req.headers["x-request-id"]);
+  const requestId = incoming || crypto.randomUUID();
+  res.setHeader("X-Request-Id", requestId);
+  return requestId;
+};
+
+const logResumeEvent = ({
+  event,
+  requestId,
+  reasonCode,
+  httpStatus,
+  tokenId,
+  deviceId,
+  roomId,
+  role,
+  latencyMs,
+  extra,
+}) => {
+  console.log(
+    JSON.stringify({
+      event,
+      requestId,
+      reasonCode,
+      httpStatus,
+      tokenId: tokenId || "",
+      deviceId: deviceId || "",
+      roomId: roomId || "",
+      role: role || "",
+      latencyMs,
+      ...(extra || {}),
+    }),
+  );
+};
+
+const getResumeRateLimitState = (key, nowMs) => {
+  const existing = resumePreflightRateState.get(key);
+  if (!existing) {
+    const fresh = { windowStartedAt: nowMs, attempts: 0, cooldownUntil: 0 };
+    resumePreflightRateState.set(key, fresh);
+    return fresh;
+  }
+  if (existing.cooldownUntil > 0 && nowMs >= existing.cooldownUntil) {
+    existing.cooldownUntil = 0;
+    existing.windowStartedAt = nowMs;
+    existing.attempts = 0;
+    return existing;
+  }
+  if (nowMs - existing.windowStartedAt >= RESUME_RATE_LIMIT_WINDOW_MS) {
+    existing.windowStartedAt = nowMs;
+    existing.attempts = 0;
+  }
+  return existing;
+};
+
+const consumeResumeRateLimit = (rateKey, nowMs) => {
+  const state = getResumeRateLimitState(rateKey, nowMs);
+  if (state.cooldownUntil > nowMs) {
+    return {
+      limited: true,
+      retryAfterSec: Math.max(
+        1,
+        Math.ceil((state.cooldownUntil - nowMs) / 1000),
+      ),
+    };
+  }
+
+  state.attempts += 1;
+  if (state.attempts > RESUME_RATE_LIMIT_MAX_ATTEMPTS) {
+    state.cooldownUntil = nowMs + RESUME_RATE_LIMIT_COOLDOWN_MS;
+    return {
+      limited: true,
+      retryAfterSec: Math.max(
+        1,
+        Math.ceil((state.cooldownUntil - nowMs) / 1000),
+      ),
+    };
+  }
+  return { limited: false, retryAfterSec: 0 };
+};
+
+const isTransactionUnsupportedError = (error) => {
+  const msg = text(error?.message).toLowerCase();
+  return (
+    msg.includes("replica set") ||
+    msg.includes("transaction numbers are only allowed") ||
+    msg.includes("transactions are not supported")
+  );
+};
 
 const isTokenConsumed = (tokenDoc) => {
   if (!tokenDoc) return false;
@@ -138,40 +240,66 @@ app.post("/sessions", (req, res) => {
 });
 
 app.post("/sessions/resume/preflight", async (req, res) => {
-  if (!requireDb(res)) {
-    return fail(
-      res,
+  const startedAt = Date.now();
+  const requestId = ensureRequestId(req, res);
+  const tokenId = text(req.body?.tokenId);
+  const role = text(req.body?.role).toLowerCase();
+  const roomId = text(req.body?.roomId);
+  const deviceId = text(req.body?.deviceId);
+  const targetHostDeviceId = text(req.body?.targetHostDeviceId);
+  const ip = getClientIp(req);
+
+  const reject = (status, message, reasonCode, extra = {}) => {
+    const retryAfterSec = Number(extra.retryAfterSec || 0);
+    if (reasonCode === "RATE_LIMITED" && retryAfterSec > 0) {
+      res.setHeader("Retry-After", String(retryAfterSec));
+    }
+    logResumeEvent({
+      event:
+        reasonCode === "RATE_LIMITED"
+          ? "resume_preflight_rate_limited"
+          : "resume_preflight_rejected",
+      requestId,
+      reasonCode,
+      httpStatus: status,
+      tokenId,
+      deviceId,
+      roomId,
+      role,
+      latencyMs: Date.now() - startedAt,
+      extra: retryAfterSec > 0 ? { retryAfterSec } : undefined,
+    });
+    return fail(res, status, message, reasonCode, requestId);
+  };
+
+  if (!isDbConnected()) {
+    return reject(
       503,
       "Resume service is temporarily unavailable.",
       "UPSTREAM_UNAVAILABLE",
     );
   }
 
-  const tokenId = text(req.body?.tokenId);
-  const role = text(req.body?.role).toLowerCase();
-  const roomId = text(req.body?.roomId);
-  const deviceId = text(req.body?.deviceId);
-  const targetHostDeviceId = text(req.body?.targetHostDeviceId);
+  const rateKey = `${ip}|${deviceId || tokenId || "unknown"}`;
+  const rateCheck = consumeResumeRateLimit(rateKey, Date.now());
+  if (rateCheck.limited) {
+    return reject(429, "Too many preflight attempts. Please retry later.", "RATE_LIMITED", {
+      retryAfterSec: rateCheck.retryAfterSec,
+    });
+  }
 
   if (!tokenId || !role || !roomId || !deviceId) {
-    return fail(
-      res,
+    return reject(
       400,
       "tokenId, role, roomId and deviceId are required.",
       "INVALID_REQUEST",
     );
   }
   if (role !== "host" && role !== "client") {
-    return fail(
-      res,
-      400,
-      "role must be either host or client.",
-      "INVALID_REQUEST",
-    );
+    return reject(400, "role must be either host or client.", "INVALID_REQUEST");
   }
   if (role === "client" && !targetHostDeviceId) {
-    return fail(
-      res,
+    return reject(
       400,
       "targetHostDeviceId is required for client preflight.",
       "INVALID_REQUEST",
@@ -182,8 +310,7 @@ app.post("/sessions/resume/preflight", async (req, res) => {
   try {
     tokenDoc = await ResumeToken.findOne({ tokenId }).lean();
   } catch (_error) {
-    return fail(
-      res,
+    return reject(
       503,
       "Resume token lookup is temporarily unavailable.",
       "UPSTREAM_UNAVAILABLE",
@@ -191,20 +318,20 @@ app.post("/sessions/resume/preflight", async (req, res) => {
   }
 
   if (!tokenDoc) {
-    return fail(res, 404, "Resume token was not found.", "TOKEN_NOT_FOUND");
+    return reject(404, "Resume token was not found.", "TOKEN_NOT_FOUND");
   }
 
   if (isTokenRevoked(tokenDoc)) {
-    return fail(res, 401, "Resume token is invalid.", "TOKEN_INVALID");
+    return reject(401, "Resume token is invalid.", "TOKEN_INVALID");
   }
 
   if (isTokenConsumed(tokenDoc)) {
-    return fail(res, 409, "Resume token has already been used.", "TOKEN_CONSUMED");
+    return reject(409, "Resume token has already been used.", "TOKEN_CONSUMED");
   }
 
   const expiresAt = tokenDoc.expiresAt ? new Date(tokenDoc.expiresAt) : null;
   if (!expiresAt || Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) {
-    return fail(res, 410, "Resume token expired.", "TOKEN_EXPIRED");
+    return reject(410, "Resume token expired.", "TOKEN_EXPIRED");
   }
 
   const tokenRole = text(tokenDoc.role).toLowerCase();
@@ -218,8 +345,7 @@ app.post("/sessions/resume/preflight", async (req, res) => {
     tokenDeviceId !== deviceId ||
     (role === "client" && tokenTargetHostDeviceId !== targetHostDeviceId)
   ) {
-    return fail(
-      res,
+    return reject(
       403,
       "Resume token does not match requested session binding.",
       "TOKEN_BINDING_MISMATCH",
@@ -239,21 +365,11 @@ app.post("/sessions/resume/preflight", async (req, res) => {
           .lean();
         const hostOnline = Boolean(hostInfo) || Boolean(hostDoc?.isOnline);
         if (!hostOnline) {
-          return fail(
-            res,
-            423,
-            "Target host is not ready for resume.",
-            "HOST_NOT_READY",
-          );
+          return reject(423, "Target host is not ready for resume.", "HOST_NOT_READY");
         }
       }
     } catch (_error) {
-      return fail(
-        res,
-        503,
-        "Resume preflight could not verify host availability.",
-        "UPSTREAM_UNAVAILABLE",
-      );
+      return reject(503, "Resume preflight could not verify host availability.", "UPSTREAM_UNAVAILABLE");
     }
   }
 
@@ -281,20 +397,21 @@ app.post("/sessions/resume/preflight", async (req, res) => {
   };
 
   const session = await mongoose.startSession();
+  let usedFallbackMode = false;
   try {
-    let consumeResult = null;
-    await session.withTransaction(async () => {
-      consumeResult = await ResumeToken.updateOne(consumeQuery, consumeUpdate, {
-        session,
-      });
+    try {
+      let consumeResult = null;
+      await session.withTransaction(async () => {
+        consumeResult = await ResumeToken.updateOne(consumeQuery, consumeUpdate, {
+          session,
+        });
 
-      if (consumeResult?.modifiedCount !== 1) {
-        const conflictError = new Error("TOKEN_CONSUMED");
-        conflictError.reasonCode = "TOKEN_CONSUMED";
-        throw conflictError;
-      }
+        if (consumeResult?.modifiedCount !== 1) {
+          const conflictError = new Error("TOKEN_CONSUMED");
+          conflictError.reasonCode = "TOKEN_CONSUMED";
+          throw conflictError;
+        }
 
-      try {
         await ResumeToken.create(
           [
             {
@@ -311,35 +428,108 @@ app.post("/sessions/resume/preflight", async (req, res) => {
           ],
           { session },
         );
-      } catch (_rotationError) {
-        const rotationError = new Error("TOKEN_ROTATION_FAILED");
-        rotationError.reasonCode = "TOKEN_ROTATION_FAILED";
-        throw rotationError;
+      });
+    } catch (error) {
+      if (!isTransactionUnsupportedError(error)) {
+        throw error;
       }
-    });
+      usedFallbackMode = true;
+      console.warn(
+        `[resume-preflight] requestId=${requestId} using non-transaction fallback mode`,
+      );
+      await ResumeToken.create({
+        tokenId: nextTokenId,
+        role,
+        roomId,
+        deviceId,
+        targetHostDeviceId: role === "client" ? targetHostDeviceId : "",
+        expiresAt: nextExpiresAt,
+        isConsumed: false,
+        isRevoked: false,
+        status: "pending_rotation",
+      });
+
+      const consumeFallbackResult = await ResumeToken.updateOne(
+        consumeQuery,
+        consumeUpdate,
+      );
+      if (consumeFallbackResult?.modifiedCount !== 1) {
+        await ResumeToken.deleteOne({ tokenId: nextTokenId }).catch(() => {});
+        return reject(409, "Resume token has already been used.", "TOKEN_CONSUMED");
+      }
+
+      const activateResult = await ResumeToken.updateOne(
+        { tokenId: nextTokenId, status: "pending_rotation" },
+        { $set: { status: "active", updatedAt: new Date() } },
+      );
+      if (activateResult?.modifiedCount !== 1) {
+        await ResumeToken.deleteOne({ tokenId: nextTokenId }).catch(() => {});
+        await ResumeToken.updateOne(
+          { tokenId, consumedAt: now },
+          {
+            $set: {
+              isConsumed: false,
+              consumedAt: null,
+              status: text(tokenDoc.status) || "active",
+              updatedAt: new Date(),
+            },
+          },
+        ).catch(() => {});
+        return reject(
+          503,
+          "Resume token rotation failed. Please retry.",
+          "TOKEN_ROTATION_FAILED",
+        );
+      }
+    }
   } catch (error) {
     const reasonCode = text(error?.reasonCode || error?.message).toUpperCase();
     if (reasonCode === "TOKEN_CONSUMED") {
-      return fail(res, 409, "Resume token has already been used.", "TOKEN_CONSUMED");
+      return reject(409, "Resume token has already been used.", "TOKEN_CONSUMED");
     }
     if (reasonCode === "TOKEN_ROTATION_FAILED") {
-      return fail(
-        res,
-        503,
-        "Resume token rotation failed. Please retry.",
-        "TOKEN_ROTATION_FAILED",
-      );
+      logResumeEvent({
+        event: "resume_preflight_rotation_failed",
+        requestId,
+        reasonCode: "TOKEN_ROTATION_FAILED",
+        httpStatus: 503,
+        tokenId,
+        deviceId,
+        roomId,
+        role,
+        latencyMs: Date.now() - startedAt,
+      });
+      return reject(503, "Resume token rotation failed. Please retry.", "TOKEN_ROTATION_FAILED");
     }
-    return fail(
-      res,
-      503,
-      "Resume token preflight is temporarily unavailable.",
-      "UPSTREAM_UNAVAILABLE",
-    );
+    logResumeEvent({
+      event: "resume_preflight_error",
+      requestId,
+      reasonCode: "UPSTREAM_UNAVAILABLE",
+      httpStatus: 503,
+      tokenId,
+      deviceId,
+      roomId,
+      role,
+      latencyMs: Date.now() - startedAt,
+      extra: { errorMessage: text(error?.message) },
+    });
+    return reject(503, "Resume token preflight is temporarily unavailable.", "UPSTREAM_UNAVAILABLE");
   } finally {
     await session.endSession().catch(() => {});
   }
 
+  logResumeEvent({
+    event: "resume_preflight_ok",
+    requestId,
+    reasonCode: "OK",
+    httpStatus: 200,
+    tokenId,
+    deviceId,
+    roomId,
+    role,
+    latencyMs: Date.now() - startedAt,
+    extra: { usedFallbackMode },
+  });
   return res.status(200).json({
     ok: true,
     message: "ok",
@@ -347,6 +537,7 @@ app.post("/sessions/resume/preflight", async (req, res) => {
     consumeCurrentToken: true,
     nextTokenId,
     nextExpiresAt: nextExpiresAt.getTime(),
+    requestId,
   });
 });
 
