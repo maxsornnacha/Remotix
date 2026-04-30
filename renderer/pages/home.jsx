@@ -5,6 +5,21 @@ import { useTheme } from '../libs/theme'
 import { getOrCreateDeviceProfile, regenerateDeviceProfile, saveDeviceProfile } from '../libs/device'
 import { useAlerts } from '../libs/alerts'
 import { api } from '../libs/http'
+import { createSessionEngine, SESSION_PHASE } from '../libs/session-engine'
+import {
+  consumeSessionResumeToken,
+  readSessionResumeToken,
+  saveSessionResumeToken,
+  validateSessionResumeToken,
+} from '../libs/session-resume'
+import {
+  buildResumePreflightRequest,
+  describeResumePreflightFailure,
+  RESUME_PREFLIGHT_MODE,
+  parseResumePreflightResponse,
+  RESUME_PREFLIGHT_ENDPOINT,
+  shouldBypassResumePreflightError,
+} from '../libs/session-resume-contract'
 
 const socket = getSocket()
 const toText = (value) => {
@@ -48,6 +63,19 @@ const toStringList = (value) => {
   if (!Array.isArray(value)) return []
   return value.map((item) => toText(item)).filter(Boolean)
 }
+const formatRemainingTime = (remainingMs) => {
+  const safe = Math.max(0, Number(remainingMs) || 0)
+  const totalSeconds = Math.floor(safe / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+const getResumeTone = (remainingMs) => {
+  const safe = Math.max(0, Number(remainingMs) || 0)
+  if (safe <= 60_000) return 'critical'
+  if (safe <= 3 * 60_000) return 'warning'
+  return 'healthy'
+}
 const normalizePairings = (items) => {
   if (!Array.isArray(items)) return []
   return items
@@ -86,12 +114,47 @@ export default function HomePage() {
     requirements: [],
     error: '',
   })
+  const [resumeToken, setResumeToken] = useState(null)
+  const [resumeRemainingMs, setResumeRemainingMs] = useState(0)
+  const [showResumeExpiredHint, setShowResumeExpiredHint] = useState(false)
+  const [isValidatingResume, setIsValidatingResume] = useState(false)
+  const [lastResumeBypassReason, setLastResumeBypassReason] = useState('')
   const outboundRequestTimeoutRef = useRef(null)
+  const sessionEngineRef = useRef(null)
   const pendingOutboundAddressRef = useRef('')
   const lastNotifiedMessageRef = useRef('')
+  const resumeExpiryWarnedRef = useRef(false)
+  const resumeHintTimeoutRef = useRef(null)
+  const hadResumeTokenRef = useRef(false)
+  const sessionAddressInputRef = useRef(null)
   const router = useRouter()
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
+  const resumeTone = getResumeTone(resumeRemainingMs)
+  const resumeToneClass = resumeTone === 'critical'
+    ? (isDark ? 'bg-red-500/20 text-red-200 border-red-400/40' : 'bg-red-100 text-red-700 border-red-300')
+    : resumeTone === 'warning'
+      ? (isDark ? 'bg-amber-500/20 text-amber-200 border-amber-400/40' : 'bg-amber-100 text-amber-700 border-amber-300')
+      : (isDark ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40' : 'bg-emerald-100 text-emerald-700 border-emerald-300')
+  const resumeToneAnimationClass = resumeTone === 'critical' ? 'animate-pulse' : ''
+  const resumeToneLabel = resumeTone === 'critical'
+    ? 'Rejoin expiring soon'
+    : resumeTone === 'warning'
+      ? 'Rejoin window limited'
+      : 'Rejoin ready'
+
+  useEffect(() => {
+    sessionEngineRef.current = createSessionEngine({
+      onTelemetry: (entry) => {
+        console.log('[home][session-engine]', entry)
+      },
+    })
+    sessionEngineRef.current.setPhase(SESSION_PHASE.IDLE)
+    return () => {
+      sessionEngineRef.current?.destroy()
+      sessionEngineRef.current = null
+    }
+  }, [])
 
   const shouldPushHomeNotification = (text, type) => {
     if (!text) return false
@@ -158,8 +221,8 @@ export default function HomePage() {
   }
 
   const clearOutboundRequestTimeout = () => {
+    sessionEngineRef.current?.clearTimeoutTask('outbound-request-timeout')
     if (!outboundRequestTimeoutRef.current) return
-    window.clearTimeout(outboundRequestTimeoutRef.current)
     outboundRequestTimeoutRef.current = null
   }
 
@@ -168,6 +231,7 @@ export default function HomePage() {
     pendingOutboundAddressRef.current = ''
     setPendingOutboundAddress('')
     setIsCheckingRoom(false)
+    sessionEngineRef.current?.setPhase(SESSION_PHASE.IDLE)
   }
 
   useEffect(() => {
@@ -182,6 +246,9 @@ export default function HomePage() {
     setDeviceId(toText(profile.deviceId))
     setDeviceName(toText(profile.displayName))
     setHasAcceptedPolicy(policyConsent === 'accepted')
+    const token = readSessionResumeToken()
+    setResumeToken(token)
+    setResumeRemainingMs(Math.max(0, Number(token?.expiresAt || 0) - Date.now()))
 
     if (!savedRecentRooms) return
     try {
@@ -191,6 +258,55 @@ export default function HomePage() {
       setRecentRooms([])
     }
   }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return () => {}
+    const tick = () => {
+      const token = readSessionResumeToken()
+      if (!token) {
+        if (hadResumeTokenRef.current) {
+          setShowResumeExpiredHint(true)
+          if (resumeHintTimeoutRef.current) {
+            window.clearTimeout(resumeHintTimeoutRef.current)
+          }
+          resumeHintTimeoutRef.current = window.setTimeout(() => {
+            setShowResumeExpiredHint(false)
+          }, 4000)
+        }
+        hadResumeTokenRef.current = false
+        setResumeToken(null)
+        setResumeRemainingMs(0)
+        return
+      }
+      hadResumeTokenRef.current = true
+      setShowResumeExpiredHint(false)
+      setResumeToken(token)
+      setResumeRemainingMs(Math.max(0, Number(token.expiresAt || 0) - Date.now()))
+    }
+    tick()
+    const intervalId = window.setInterval(tick, 1000)
+    return () => {
+      window.clearInterval(intervalId)
+      if (resumeHintTimeoutRef.current) {
+        window.clearTimeout(resumeHintTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!resumeToken) {
+      resumeExpiryWarnedRef.current = false
+      return
+    }
+    if (resumeRemainingMs > 60_000) {
+      resumeExpiryWarnedRef.current = false
+      return
+    }
+    if (resumeRemainingMs <= 0) return
+    if (resumeExpiryWarnedRef.current) return
+    resumeExpiryWarnedRef.current = true
+    pushAlert('Rejoin session will expire in less than 1 minute.', { type: 'error' })
+  }, [resumeToken, resumeRemainingMs, pushAlert])
 
   useEffect(() => {
     checkPermissions()
@@ -401,6 +517,7 @@ export default function HomePage() {
 
     setIsCheckingRoom(true)
     setPendingOutboundAddress(targetHostDeviceId)
+    sessionEngineRef.current?.setPhase(SESSION_PHASE.REQUESTING)
     setFeedbackWithAlert('Checking address in database...', 'info', { silent: true })
 
     api.get(`/devices/${encodeURIComponent(targetHostDeviceId)}/status`)
@@ -418,16 +535,17 @@ export default function HomePage() {
 
         setFeedbackWithAlert('Sending connection request. Waiting for host approval...')
         clearOutboundRequestTimeout()
-        outboundRequestTimeoutRef.current = window.setTimeout(() => {
+        outboundRequestTimeoutRef.current = sessionEngineRef.current?.setTimeoutTask('outbound-request-timeout', 15000, () => {
           resetOutboundRequestState()
           setFeedbackWithAlert('Request timed out. Host did not respond in time.', 'error')
-        }, 15000)
+        })
         socket.emit('request-connection', {
           targetHostDeviceId,
           clientDeviceId: deviceId,
           clientDisplayName: deviceName || 'Client Device',
         }, (response) => {
           if (response?.ok) return
+          sessionEngineRef.current?.setPhase(SESSION_PHASE.ENDED)
           resetOutboundRequestState()
           const fallbackMessage = targetHostDeviceId
             ? 'Address not found in system.'
@@ -436,6 +554,7 @@ export default function HomePage() {
         })
       })
       .catch((error) => {
+        sessionEngineRef.current?.setPhase(SESSION_PHASE.ENDED)
         resetOutboundRequestState()
         const message = error?.response?.data?.message || 'Could not verify address in database.'
         setFeedbackWithAlert(message, 'error')
@@ -443,6 +562,118 @@ export default function HomePage() {
   }
 
   const joinRoom = () => requestConnectionToAddress(roomId)
+
+  const rejoinLastSession = () => {
+    if (isValidatingResume) return
+    const token = readSessionResumeToken()
+    if (!token) {
+      setResumeToken(null)
+      setFeedbackWithAlert('No active session to rejoin.', 'error')
+      return
+    }
+    const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
+    const safeDeviceId = toText(deviceId) || fallbackDeviceId
+    const validation = validateSessionResumeToken(token, { expectedDeviceId: safeDeviceId })
+    if (!validation.ok) {
+      consumeSessionResumeToken()
+      setResumeToken(null)
+      setResumeRemainingMs(0)
+      setFeedbackWithAlert('Last session cannot be resumed. Please start a new session.', 'error')
+      return
+    }
+    setIsValidatingResume(true)
+    const run = async () => {
+      try {
+        const requestPayload = buildResumePreflightRequest({
+          tokenId: token.tokenId,
+          role: token.role,
+          roomId: token.roomId,
+          deviceId: safeDeviceId,
+          targetHostDeviceId: token.targetHostDeviceId,
+        })
+        try {
+          const { data } = await api.post(RESUME_PREFLIGHT_ENDPOINT, requestPayload)
+          const preflight = parseResumePreflightResponse(data)
+          if (!preflight.ok) {
+            throw new Error(preflight.message || 'Resume preflight was rejected by server.')
+          }
+          // One-time token behavior: remove current token immediately after approval.
+          if (preflight.consumeCurrentToken) {
+            consumeSessionResumeToken()
+            if (preflight.nextTokenId) {
+              const nextExpiresAt = Number(preflight.nextExpiresAt || 0)
+              const ttlMs = Math.max(30_000, nextExpiresAt - Date.now())
+              saveSessionResumeToken(
+                {
+                  ...token,
+                  tokenId: preflight.nextTokenId,
+                  createdAt: Date.now(),
+                },
+                ttlMs,
+              )
+            }
+          }
+          if (preflight.reasonCode === 'DEV_FALLBACK') {
+            setLastResumeBypassReason(
+              `Bypassed preflight (${preflight.reasonCode} via ${preflight.source}${preflight.requestId ? `, request ${preflight.requestId}` : ''})`,
+            )
+          } else {
+            setLastResumeBypassReason('')
+          }
+        } catch (preflightError) {
+          if (!shouldBypassResumePreflightError(preflightError)) {
+            const message =
+              toText(preflightError?.response?.data?.message) ||
+              toText(preflightError?.message) ||
+              'Resume preflight was rejected by server.'
+            throw new Error(message)
+          }
+          const details = describeResumePreflightFailure(preflightError)
+          setLastResumeBypassReason(
+            `Bypassed preflight (${details.reasonCode || details.status || details.code || 'unavailable'} via ${details.source || 'unknown'}${details.upstreamStatus ? `, upstream ${details.upstreamStatus}` : ''}${details.requestId ? `, request ${details.requestId}` : ''}): ${details.message}`,
+          )
+          setFeedbackWithAlert(
+            'Resume preflight endpoint is unavailable. Continuing in compatibility mode.',
+            'error',
+          )
+        }
+
+        if (token.role === 'client') {
+          const targetHostDeviceId = toText(token.targetHostDeviceId)
+          const { data } = await api.get(`/devices/${encodeURIComponent(targetHostDeviceId)}/status`)
+          if (!data?.exists) throw new Error('Host device does not exist anymore.')
+          if (!data?.isOnline) throw new Error('Host device is offline now.')
+        }
+
+        setResumeToken(token)
+        setResumeRemainingMs(Math.max(0, Number(token.expiresAt || 0) - Date.now()))
+        const encodedName = encodeURIComponent(deviceName || (token.role === 'host' ? 'Host Device' : 'Client Device'))
+        if (token.role === 'host') {
+          router.push(`/host/${toText(token.roomId)}?deviceId=${safeDeviceId}&name=${encodedName}&resume=1`)
+          return
+        }
+        router.push(
+          `/client/${toText(token.roomId)}?deviceId=${safeDeviceId}&name=${encodedName}&targetHostDeviceId=${toText(token.targetHostDeviceId)}&preapproved=1&resume=1`,
+        )
+      } catch (error) {
+        consumeSessionResumeToken()
+        setResumeToken(null)
+        setResumeRemainingMs(0)
+        const message = toText(error?.message) || 'Last session cannot be resumed right now.'
+        setFeedbackWithAlert(message, 'error')
+      } finally {
+        setIsValidatingResume(false)
+      }
+    }
+    run()
+  }
+
+  const createNewSession = () => {
+    setShowResumeExpiredHint(false)
+    setRoomId('')
+    setFeedback('')
+    sessionAddressInputRef.current?.focus?.()
+  }
 
   const clearRecentRooms = () => {
     if (typeof window === 'undefined') return
@@ -789,6 +1020,7 @@ export default function HomePage() {
 
             <div className="space-y-2">
               <input
+                ref={sessionAddressInputRef}
                 type="text"
                 value={roomId}
                 onChange={(e) => setRoomId(toText(e.target.value))}
@@ -811,6 +1043,62 @@ export default function HomePage() {
                     </>
                   ) : 'Connect'}
                 </button>
+                {resumeToken || showResumeExpiredHint ? (
+                  <div className="space-y-1">
+                    <button
+                      type="button"
+                      onClick={resumeToken ? rejoinLastSession : createNewSession}
+                      disabled={isCheckingRoom || isServiceLocked || isValidatingResume}
+                      className={`w-full font-semibold py-2 rounded-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
+                        resumeToken
+                          ? 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                          : 'bg-slate-600 hover:bg-slate-500 text-white'
+                      }`}
+                    >
+                      {resumeToken ? (isValidatingResume ? 'Validating Resume...' : 'Rejoin Last Session') : 'Create New Session'}
+                    </button>
+                    {resumeToken ? (
+                      <p className={`text-[11px] text-center ${isDark ? 'text-indigo-300' : 'text-indigo-700'}`}>
+                        Expires in {formatRemainingTime(resumeRemainingMs)}
+                      </p>
+                    ) : (
+                      <p className={`text-[11px] text-center transition-opacity duration-500 ${isDark ? 'text-slate-300' : 'text-slate-600'} opacity-80`}>
+                        Last rejoin session has expired.
+                      </p>
+                    )}
+                    <div className="flex justify-center">
+                      {resumeToken ? (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full border ${resumeToneClass} ${resumeToneAnimationClass}`}>
+                          {resumeToneLabel}
+                        </span>
+                      ) : (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full border transition-opacity duration-500 ${isDark ? 'bg-slate-600/30 text-slate-300 border-slate-500/40' : 'bg-slate-100 text-slate-600 border-slate-300'} opacity-80`}>
+                          Expired
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex justify-center">
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                          RESUME_PREFLIGHT_MODE === 'allow_unavailable'
+                            ? (isDark
+                                ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
+                                : 'bg-amber-100 text-amber-700 border-amber-300')
+                            : (isDark
+                                ? 'bg-slate-600/30 text-slate-300 border-slate-500/40'
+                                : 'bg-slate-100 text-slate-600 border-slate-300')
+                        }`}
+                      >
+                        Preflight Mode: {RESUME_PREFLIGHT_MODE}
+                      </span>
+                    </div>
+                    {lastResumeBypassReason ? (
+                      <p className={`text-[10px] text-center ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+                        {lastResumeBypassReason}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                 Host must allow your request before both devices enter the detail session.

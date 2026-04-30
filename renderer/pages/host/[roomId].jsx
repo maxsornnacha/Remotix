@@ -5,8 +5,48 @@ import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
 import { useAlerts } from '../../libs/alerts'
 import { attachRtcDiagnostics, getRtcConfig } from '../../libs/rtc'
+import { api } from '../../libs/http'
+import {
+  clearSessionResumeToken,
+  saveSessionResumeToken,
+} from '../../libs/session-resume'
+import {
+  createSessionEngine,
+  getConnectionQualityDescriptor,
+  getSessionPhaseMessage,
+  SESSION_PHASE,
+  SESSION_RECOVERY,
+} from '../../libs/session-engine'
 
 const socket = getSocket();
+const toPositiveInt = (value, fallback) => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return Math.floor(parsed)
+}
+const QUALITY_APPLY_COOLDOWN_MS = toPositiveInt(process.env.NEXT_PUBLIC_QUALITY_APPLY_COOLDOWN_MS, 6000)
+const QUALITY_URGENT_DOWNGRADE_LEVEL = String(
+  process.env.NEXT_PUBLIC_QUALITY_URGENT_DOWNGRADE_LEVEL || 'poor',
+)
+  .trim()
+  .toLowerCase()
+const REQUEST_RISK_WINDOW_MS = 60_000
+const REQUEST_RISK_BURST_THRESHOLD = 3
+const HOST_AUDIT_MAX_ITEMS = 30
+const HOST_AUDIT_ENDPOINT =
+  (typeof process.env.NEXT_PUBLIC_HOST_AUDIT_ENDPOINT === 'string'
+    ? process.env.NEXT_PUBLIC_HOST_AUDIT_ENDPOINT.trim()
+    : '') || '/audit/host-connection-events'
+const HOST_AUDIT_INGEST_KEY =
+  typeof process.env.NEXT_PUBLIC_HOST_AUDIT_INGEST_KEY === 'string'
+    ? process.env.NEXT_PUBLIC_HOST_AUDIT_INGEST_KEY.trim()
+    : ''
+const HOST_APPROVAL_POLICY_KEY = 'remotix-host-approval-policy'
+const HOST_APPROVAL_POLICY = {
+  ALWAYS_ASK: 'always_ask',
+  ASK_NEW_ONLY: 'ask_new_only',
+  AUTO_APPROVE_TRUSTED: 'auto_approve_trusted',
+}
 
 function WifiSignalIcon({ isDark }) {
   return (
@@ -26,6 +66,20 @@ const toText = (value) => {
   if (typeof value === 'string' || typeof value === 'number') return String(value)
   return ''
 }
+const formatRelativeTime = (value) => {
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return ''
+  const diffMs = Date.now() - timestamp
+  if (diffMs < 0) return 'just now'
+  const minutes = Math.floor(diffMs / 60000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
+}
+const toNormalizedLower = (value) => toText(value).trim().toLowerCase()
 
 const isScreenSource = (sourceId) => toText(sourceId).startsWith('screen:')
 
@@ -83,10 +137,17 @@ export default function HostPage() {
   const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false)
   const [availableSources, setAvailableSources] = useState([])
   const [selectedSourceId, setSelectedSourceId] = useState('')
+  const [approvalPolicy, setApprovalPolicy] = useState(HOST_APPROVAL_POLICY.ALWAYS_ASK)
+  const [knownPairings, setKnownPairings] = useState([])
+  const [requestDeviceInfo, setRequestDeviceInfo] = useState({})
+  const [riskConfirmRequest, setRiskConfirmRequest] = useState(null)
+  const [hostAuditTrail, setHostAuditTrail] = useState([])
   const [sessionEndedReason, setSessionEndedReason] = useState('')
   const [isSignalingActive, setIsSignalingActive] = useState(false)
   const [isPeerConnected, setIsPeerConnected] = useState(false)
   const [latencyMs, setLatencyMs] = useState(null)
+  const [sessionPhase, setSessionPhase] = useState(SESSION_PHASE.IDLE)
+  const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [permissionGate, setPermissionGate] = useState({
     checking: true,
     allGranted: false,
@@ -110,11 +171,87 @@ export default function HostPage() {
   const lastNotifiedMessageRef = useRef('')
   const isManualDisconnectRef = useRef(false)
   const appliedQualityLevelRef = useRef('')
+  const approvalPolicyRef = useRef(HOST_APPROVAL_POLICY.ALWAYS_ASK)
+  const hasAcceptedPolicyRef = useRef(false)
+  const requestHistoryRef = useRef({})
+  const sessionEngineRef = useRef(null)
+  const lastPhaseToastRef = useRef('')
+  const lastQualityApplyAtRef = useRef(0)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const logDebug = (stage, payload = {}) => {
     console.log(`[host][debug] ${stage}`, payload)
   }
+
+  const buildRequestRiskSummary = (request) => {
+    const safeRequest = request && typeof request === 'object' ? request : {}
+    const clientDeviceId = toText(safeRequest.clientDeviceId).trim()
+    const requestLabel = toText(safeRequest.clientDisplayName).trim()
+    const pairing = knownPairings.find(
+      (item) => toText(item?.peerDeviceId).trim() === clientDeviceId,
+    )
+    const status = requestDeviceInfo[clientDeviceId]
+    const reasons = []
+    const isTrusted = Boolean(pairing)
+    const pairingLabel = toText(pairing?.peerLabel).trim()
+    if (
+      isTrusted &&
+      pairingLabel &&
+      requestLabel &&
+      toNormalizedLower(pairingLabel) !== toNormalizedLower(requestLabel)
+    ) {
+      reasons.push('Trusted device label changed from previous pairing.')
+    }
+    const historyKey = clientDeviceId || toText(safeRequest.clientSocketId).trim() || 'unknown'
+    const history = Array.isArray(requestHistoryRef.current[historyKey])
+      ? requestHistoryRef.current[historyKey]
+      : []
+    if (history.length >= REQUEST_RISK_BURST_THRESHOLD) {
+      reasons.push('Multiple connection requests in a short time window.')
+    }
+    if (isTrusted && status && status.exists && status.isOnline === false) {
+      reasons.push('Trusted device reported offline in device registry.')
+    }
+    return {
+      isTrusted,
+      reasons,
+      level: reasons.length > 0 ? 'warning' : 'normal',
+    }
+  }
+
+  useEffect(() => {
+    sessionEngineRef.current = createSessionEngine({
+      onPhaseChange: (phase) => {
+        setSessionPhase(phase)
+        if (phase === SESSION_PHASE.RECOVERING) {
+          setNotice('Session is recovering automatically...', 'error')
+        }
+        if (
+          phase !== lastPhaseToastRef.current &&
+          (phase === SESSION_PHASE.RECOVERING ||
+            phase === SESSION_PHASE.LIVE ||
+            phase === SESSION_PHASE.ENDED)
+        ) {
+          lastPhaseToastRef.current = phase
+          const toastType =
+            phase === SESSION_PHASE.LIVE
+              ? 'success'
+              : phase === SESSION_PHASE.ENDED
+                ? 'error'
+                : 'info'
+          pushAlert(getSessionPhaseMessage(phase, 'host'), { type: toastType })
+        }
+      },
+      onTelemetry: (entry) => {
+        console.log('[host][session-engine]', entry)
+      },
+    })
+    sessionEngineRef.current.setPhase(SESSION_PHASE.JOINED)
+    return () => {
+      sessionEngineRef.current?.destroy()
+      sessionEngineRef.current = null
+    }
+  }, [])
 
   const stopStreamDebugMonitor = () => {
     if (!streamDebugIntervalRef.current) return
@@ -129,6 +266,48 @@ export default function HostPage() {
       window.ipc.invoke('session:keep-awake', { enabled: false }).catch(() => {})
     }
   }, [])
+
+  useEffect(() => {
+    approvalPolicyRef.current = approvalPolicy
+  }, [approvalPolicy])
+
+  useEffect(() => {
+    hasAcceptedPolicyRef.current = hasAcceptedPolicy
+  }, [hasAcceptedPolicy])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const saved = toText(window.localStorage.getItem(HOST_APPROVAL_POLICY_KEY)).toLowerCase()
+    if (
+      saved === HOST_APPROVAL_POLICY.ALWAYS_ASK ||
+      saved === HOST_APPROVAL_POLICY.ASK_NEW_ONLY ||
+      saved === HOST_APPROVAL_POLICY.AUTO_APPROVE_TRUSTED
+    ) {
+      setApprovalPolicy(saved)
+      approvalPolicyRef.current = saved
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(HOST_APPROVAL_POLICY_KEY, approvalPolicy)
+  }, [approvalPolicy])
+
+  useEffect(() => {
+    const activeRoomId = toText(roomId)
+    if (!activeRoomId) return
+    const writeToken = () => {
+      saveSessionResumeToken({
+        role: 'host',
+        roomId: activeRoomId,
+        deviceId: toText(deviceId),
+        displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Host Device',
+      })
+    }
+    writeToken()
+    const tokenInterval = window.setInterval(writeToken, 10_000)
+    return () => window.clearInterval(tokenInterval)
+  }, [roomId, deviceId, name])
 
   useEffect(() => {
     checkPermissions()
@@ -183,6 +362,124 @@ export default function HostPage() {
     const text = toText(message)
     setDbUnavailableMessage(text)
     if (text) pushAlert(text, { type: 'error' })
+  }
+
+  const appendHostAuditEvent = (eventName, payload = {}) => {
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      event: toText(eventName) || 'host_event',
+      requestId: toText(payload.requestId),
+      policyMode: toText(payload.policyMode || approvalPolicyRef.current),
+      clientDeviceId: toText(payload.clientDeviceId),
+      clientDisplayName: toText(payload.clientDisplayName),
+      clientSocketId: toText(payload.clientSocketId),
+      reason: toText(payload.reason),
+      riskReasons: Array.isArray(payload.riskReasons)
+        ? payload.riskReasons.map((item) => toText(item)).filter(Boolean)
+        : [],
+      approved: Boolean(payload.approved),
+      roomId: toText(payload.roomId || roomId),
+      at: new Date().toISOString(),
+    }
+    setHostAuditTrail((prev) => [entry, ...prev].slice(0, HOST_AUDIT_MAX_ITEMS))
+
+    api.post(HOST_AUDIT_ENDPOINT, entry, {
+      headers: HOST_AUDIT_INGEST_KEY
+        ? { 'x-audit-ingest-key': HOST_AUDIT_INGEST_KEY }
+        : undefined,
+    }).catch(() => {
+      // Optional remote audit endpoint; local trail remains source of truth.
+    })
+  }
+
+  const copyDiagnosticsSnapshot = async () => {
+    const snapshot = {
+      schemaVersion: '1.0.0',
+      role: 'host',
+      phase: sessionPhase,
+      roomId: toText(roomId),
+      approvedRoomId: '',
+      signalingConnected: isSignalingActive,
+      peerConnected: isPeerConnected,
+      streamActive: isSharing,
+      allowControl,
+      pointerLocked: false,
+      fullscreen: false,
+      controlProfile: '',
+      sourceId: toText(selectedSourceId),
+      latencyMs,
+      status: toText(sessionNotice),
+      auditTrail: hostAuditTrail.slice(0, 20),
+      timestamp: new Date().toISOString(),
+    }
+
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+      setNotice('Clipboard API is unavailable in this environment.', 'error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2))
+      setNotice('Diagnostics snapshot copied.', 'success')
+    } catch (_error) {
+      setNotice('Could not copy diagnostics snapshot.', 'error')
+    }
+  }
+
+  const downloadDiagnosticsSnapshot = () => {
+    const snapshot = {
+      schemaVersion: '1.0.0',
+      role: 'host',
+      phase: sessionPhase,
+      roomId: toText(roomId),
+      approvedRoomId: '',
+      signalingConnected: isSignalingActive,
+      peerConnected: isPeerConnected,
+      streamActive: isSharing,
+      allowControl,
+      pointerLocked: false,
+      fullscreen: false,
+      controlProfile: '',
+      sourceId: toText(selectedSourceId),
+      latencyMs,
+      status: toText(sessionNotice),
+      auditTrail: hostAuditTrail.slice(0, 20),
+      timestamp: new Date().toISOString(),
+    }
+    try {
+      const payload = JSON.stringify(snapshot, null, 2)
+      const blob = new Blob([payload], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `remotix-host-snapshot-${Date.now()}.json`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      setNotice('Diagnostics snapshot downloaded.', 'success')
+    } catch (_error) {
+      setNotice('Could not download diagnostics snapshot.', 'error')
+    }
+  }
+
+  const updatePhaseFromEvent = (eventName) => {
+    const engine = sessionEngineRef.current
+    if (!engine) return
+    if (eventName === 'room-joined') {
+      engine.setPhase(SESSION_PHASE.JOINED)
+      return
+    }
+    if (eventName === 'handshake-start') {
+      engine.setPhase(SESSION_PHASE.HANDSHAKING)
+      return
+    }
+    if (eventName === 'session-ended') {
+      engine.setPhase(SESSION_PHASE.ENDED)
+      return
+    }
+    if (eventName === 'recovering') {
+      engine.setPhase(SESSION_PHASE.RECOVERING)
+    }
   }
 
   const checkPermissions = async () => {
@@ -313,6 +610,12 @@ export default function HostPage() {
     }
     const target = profileMap[level] || profileMap.good
     if (appliedQualityLevelRef.current === level) return
+    const now = Date.now()
+    const withinCooldown = now - lastQualityApplyAtRef.current < QUALITY_APPLY_COOLDOWN_MS
+    const isUrgentDowngrade =
+      level === QUALITY_URGENT_DOWNGRADE_LEVEL &&
+      (appliedQualityLevelRef.current === 'good' || appliedQualityLevelRef.current === 'fair')
+    if (withinCooldown && !isUrgentDowngrade) return
 
     try {
       await track.applyConstraints({
@@ -321,6 +624,7 @@ export default function HostPage() {
         frameRate: { ideal: target.frameRate, max: target.frameRate },
       })
       appliedQualityLevelRef.current = level
+      lastQualityApplyAtRef.current = now
       setSessionNotice(`Connection quality: ${level}. Stream optimized automatically.`)
     } catch (error) {
       console.warn('[host][quality] applyConstraints failed', error)
@@ -355,13 +659,27 @@ export default function HostPage() {
         window.clearTimeout(peerHealthTimeoutRef.current)
         peerHealthTimeoutRef.current = null
       }
+      sessionEngineRef.current?.clearTimeoutTask('peer-health-timeout')
       setIsPeerConnected(true)
+      updatePhaseFromEvent('handshake-start')
       setNotice('Secure peer channel established.', 'success')
     })
 
     peer.on('close', () => {
       setIsPeerConnected(false)
-      showSessionEnded('Client disconnected from this room.')
+      if (isManualDisconnectRef.current) return
+      const didSchedule = sessionEngineRef.current?.scheduleRecovery(
+        SESSION_RECOVERY.PEER,
+        () => {
+          hasAnnouncedReadyRef.current = false
+          announceHandshakeReady()
+        },
+      )
+      if (!didSchedule) {
+        showSessionEnded('Connection dropped repeatedly. Please reconnect from home.')
+        return
+      }
+      setNotice('Client connection dropped. Waiting for automatic reconnect...', 'error')
     })
 
     peer.on('error', (error) => {
@@ -376,9 +694,9 @@ export default function HostPage() {
     if (peerHealthTimeoutRef.current) {
       window.clearTimeout(peerHealthTimeoutRef.current)
     }
-    peerHealthTimeoutRef.current = window.setTimeout(() => {
+    peerHealthTimeoutRef.current = sessionEngineRef.current?.setTimeoutTask('peer-health-timeout', 15000, () => {
       setNotice('Connection timed out. Check your network and press Restart Share.', 'error')
-    }, 15000)
+    })
   }
 
   const stopStreamHealthMonitor = () => {
@@ -597,6 +915,7 @@ export default function HostPage() {
       }
       hasJoinedRoomRef.current = true
       setIsSignalingActive(true)
+      updatePhaseFromEvent('room-joined')
       console.log('[host][join-room] success', response)
       if (localStreamRef.current) {
         announceHandshakeReady()
@@ -640,14 +959,62 @@ export default function HostPage() {
     })
 
     socket.on('incoming-connection-request', (request) => {
-      setIncomingRequests((prev) => {
-        const withoutDup = prev.filter((item) => item.clientSocketId !== request.clientSocketId)
-        return [...withoutDup, request]
-      })
-      if (!hasAcceptedPolicy) {
+      const safeRequest = request && typeof request === 'object' ? request : {}
+      const clientDeviceId = toText(safeRequest.clientDeviceId).trim()
+      const historyKey = clientDeviceId || toText(safeRequest.clientSocketId).trim() || 'unknown'
+      const now = Date.now()
+      const prevHistory = Array.isArray(requestHistoryRef.current[historyKey])
+        ? requestHistoryRef.current[historyKey]
+        : []
+      requestHistoryRef.current[historyKey] = [...prevHistory, now].filter(
+        (timestamp) => now - Number(timestamp || 0) <= REQUEST_RISK_WINDOW_MS,
+      )
+      const isTrusted = Boolean(
+        clientDeviceId &&
+        knownPairings.some((item) => toText(item?.peerDeviceId).trim() === clientDeviceId),
+      )
+      const risk = buildRequestRiskSummary(safeRequest)
+      const policyMode = approvalPolicyRef.current
+      const shouldAutoApproveTrusted =
+        (policyMode === HOST_APPROVAL_POLICY.ASK_NEW_ONLY ||
+          policyMode === HOST_APPROVAL_POLICY.AUTO_APPROVE_TRUSTED) &&
+        isTrusted
+
+      if (!hasAcceptedPolicyRef.current) {
         setIsPolicyConsentPromptOpen(true)
       }
-      setNotice(`Incoming request from ${request.clientDisplayName || 'Unknown Client'}.`)
+      if (!hasAcceptedPolicyRef.current || !shouldAutoApproveTrusted || risk.level === 'warning') {
+        setIncomingRequests((prev) => {
+          const withoutDup = prev.filter((item) => item.clientSocketId !== safeRequest.clientSocketId)
+          return [...withoutDup, safeRequest]
+        })
+        appendHostAuditEvent('request_received', {
+          requestId: toText(safeRequest.requestId),
+          clientDeviceId,
+          clientDisplayName: toText(safeRequest.clientDisplayName),
+          clientSocketId: toText(safeRequest.clientSocketId),
+          riskReasons: risk.reasons,
+          reason: risk.level === 'warning' ? 'risk_signal' : 'manual_review',
+          approved: false,
+        })
+        setNotice(
+          risk.level === 'warning'
+            ? `Incoming request from ${safeRequest.clientDisplayName || 'Unknown Client'} requires extra verification.`
+            : `Incoming request from ${safeRequest.clientDisplayName || 'Unknown Client'}.`,
+        )
+        return
+      }
+
+      appendHostAuditEvent('request_auto_approved', {
+        requestId: toText(safeRequest.requestId),
+        clientDeviceId,
+        clientDisplayName: toText(safeRequest.clientDisplayName),
+        clientSocketId: toText(safeRequest.clientSocketId),
+        approved: true,
+        reason: 'trusted_policy',
+      })
+      setNotice(`Trusted device ${safeRequest.clientDisplayName || clientDeviceId || 'Unknown Client'} was approved automatically.`, 'success')
+      handleConnectionRequest(safeRequest.clientSocketId, true)
     })
 
     socket.on('service-unavailable', (payload) => {
@@ -658,6 +1025,7 @@ export default function HostPage() {
     socket.on('disconnect', () => {
       setNotice('Connection lost. Waiting for network recovery...', 'error')
       setIsSignalingActive(false)
+      updatePhaseFromEvent('recovering')
     })
 
     socket.on('connect_error', () => {
@@ -667,9 +1035,13 @@ export default function HostPage() {
     socket.on('reconnect', () => {
       setNotice('Connection restored. Rejoining host session...', 'success')
       setIsSignalingActive(true)
+      updatePhaseFromEvent('room-joined')
+      hasAnnouncedReadyRef.current = false
+      announceHandshakeReady()
     })
 
     socket.on('session-ended', (payload) => {
+      updatePhaseFromEvent('session-ended')
       showSessionEnded(payload?.message || 'Client ended the session.')
     })
 
@@ -735,7 +1107,7 @@ export default function HostPage() {
       socket.off('session-ended');
       socket.off('client-network-quality');
     }
-  }, [roomId, allowControl, router, hasAcceptedPolicy])
+  }, [roomId, allowControl, router, knownPairings])
 
   useEffect(() => {
     const leaveCurrentSession = () => {
@@ -775,6 +1147,57 @@ export default function HostPage() {
       socket.off('connect', emitHeartbeat)
     }
   }, [deviceId, name])
+
+  useEffect(() => {
+    const hostDeviceId = toText(deviceId).trim()
+    if (!hostDeviceId) return
+    let cancelled = false
+    const loadPairings = async () => {
+      try {
+        const { data } = await api.get(`/pairings/${encodeURIComponent(hostDeviceId)}`)
+        const items = Array.isArray(data?.items) ? data.items : []
+        if (!cancelled) setKnownPairings(items)
+      } catch (_error) {
+        if (!cancelled) setKnownPairings([])
+      }
+    }
+    loadPairings()
+    return () => {
+      cancelled = true
+    }
+  }, [deviceId])
+
+  useEffect(() => {
+    const candidates = incomingRequests
+      .map((request) => toText(request?.clientDeviceId).trim())
+      .filter(Boolean)
+      .filter((value, index, list) => list.indexOf(value) === index)
+      .filter((value) => !requestDeviceInfo[value])
+    if (candidates.length === 0) return
+    let cancelled = false
+    Promise.all(
+      candidates.map(async (candidateId) => {
+        try {
+          const { data } = await api.get(`/devices/${encodeURIComponent(candidateId)}/status`)
+          return [candidateId, data]
+        } catch (_error) {
+          return [candidateId, null]
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return
+      setRequestDeviceInfo((prev) => {
+        const next = { ...prev }
+        results.forEach(([candidateId, data]) => {
+          next[candidateId] = data
+        })
+        return next
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [incomingRequests, requestDeviceInfo])
 
   const ensureScreenSharingStarted = async (forceReselect = false) => {
     if (localStreamRef.current && !forceReselect) return true
@@ -903,15 +1326,27 @@ export default function HostPage() {
 
         stream.getVideoTracks().forEach((track) => {
           track.onended = () => {
+            if (isManualDisconnectRef.current) return
             localStreamRef.current = null
             setIsSharing(false)
             stopStreamHealthMonitor()
-            setNotice('Screen sharing stopped. Approve a request to start sharing again.')
+            const didSchedule = sessionEngineRef.current?.scheduleRecovery(
+              SESSION_RECOVERY.STREAM,
+              () => {
+                ensureScreenSharingStarted(true).catch(() => {})
+              },
+            )
+            if (!didSchedule) {
+              setNotice('Screen capture recovery exceeded retry limit.', 'error')
+              return
+            }
+            setNotice('Screen capture stopped. Recovering screen share automatically...', 'error')
           }
         })
 
         await attachStreamToPreview(stream)
         setIsSharing(true)
+        sessionEngineRef.current?.markHealthy()
         startStreamHealthMonitor()
         announceHandshakeReady()
         if (pendingPeerIdRef.current) {
@@ -983,6 +1418,7 @@ export default function HostPage() {
     setIsPeerConnected(false)
     setIsSignalingActive(false)
     setLatencyMs(null)
+    clearSessionResumeToken()
 
     router.push('/home')
   }
@@ -998,6 +1434,27 @@ export default function HostPage() {
   }
 
   const handleConnectionRequest = async (clientSocketId, approved) => {
+    if (approved) {
+      const target = incomingRequests.find((item) => item.clientSocketId === clientSocketId)
+      const risk = buildRequestRiskSummary(target)
+      if (risk.level === 'warning' && !riskConfirmRequest) {
+        appendHostAuditEvent('request_risk_confirmation_required', {
+          clientDeviceId: toText(target?.clientDeviceId),
+          clientDisplayName: toText(target?.clientDisplayName),
+          clientSocketId,
+          riskReasons: risk.reasons,
+          approved: false,
+          reason: 'risk_confirm',
+        })
+        setRiskConfirmRequest({
+          clientSocketId,
+          clientDisplayName: toText(target?.clientDisplayName) || 'Unknown Client',
+          reasons: risk.reasons,
+        })
+        setNotice('Risk signal detected. Please confirm before approving access.', 'error')
+        return
+      }
+    }
     if (approved && !ensurePolicyAccepted()) {
       return
     }
@@ -1011,14 +1468,27 @@ export default function HostPage() {
 
     socket.emit('respond-connection-request', { clientSocketId, approved }, (response) => {
       if (!response?.ok) {
+        appendHostAuditEvent('request_respond_failed', {
+          clientSocketId,
+          approved,
+          reason: toText(response?.message) || 'respond_failed',
+          roomId: toText(response?.roomId),
+        })
         setNotice(response?.message || 'Could not process connection request.', 'error')
         return
       }
+      appendHostAuditEvent(approved ? 'request_approved' : 'request_rejected', {
+        clientSocketId,
+        approved,
+        reason: approved ? 'host_approved' : 'host_rejected',
+        roomId: toText(response?.roomId),
+      })
       if (approved && response?.roomId) {
         console.log('[host][request] approved', response)
       }
     })
     setIncomingRequests((prev) => prev.filter((item) => item.clientSocketId !== clientSocketId))
+    setRiskConfirmRequest(null)
     setNotice(approved ? 'Connection approved. Client can now join securely.' : 'Connection rejected.', approved ? 'success' : 'error')
   }
 
@@ -1029,13 +1499,29 @@ export default function HostPage() {
   ]
   const requiredHostSteps = hostConnectionSteps.filter((step) => step.key !== 'peer')
   const isHostDetailReady = requiredHostSteps.every((step) => step.done)
+  const sessionPhaseLabel = getSessionPhaseMessage(sessionPhase, 'host')
+  const effectiveHostNotice = toText(sessionNotice) || sessionPhaseLabel
+  const quality = getConnectionQualityDescriptor(latencyMs, sessionPhase)
+  const qualityClass = quality.tone === 'healthy'
+    ? (isDark ? 'bg-emerald-700/30 border-emerald-500/40 text-emerald-200' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
+    : quality.tone === 'warning'
+      ? (isDark ? 'bg-amber-700/30 border-amber-500/40 text-amber-200' : 'bg-amber-100 border-amber-300 text-amber-700')
+      : quality.tone === 'critical'
+        ? (isDark ? 'bg-red-700/30 border-red-500/40 text-red-200' : 'bg-red-100 border-red-300 text-red-700')
+        : (isDark ? 'bg-slate-700/40 border-slate-500/40 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700')
 
   useEffect(() => {
-    if (!roomId || isHostDetailReady) return
-    const timeoutId = window.setTimeout(() => {
+    const engine = sessionEngineRef.current
+    if (!engine || !roomId || isHostDetailReady) {
+      engine?.clearTimeoutTask('connect-timeout')
+      return
+    }
+    engine.setTimeoutTask('connect-timeout', 25000, () => {
       exitSessionFlow('Connection timed out. Returning to home.')
-    }, 25000)
-    return () => window.clearTimeout(timeoutId)
+    })
+    return () => {
+      engine.clearTimeoutTask('connect-timeout')
+    }
   }, [roomId, isHostDetailReady])
 
   if (sessionEndedReason) {
@@ -1080,11 +1566,10 @@ export default function HostPage() {
             }`}>
               {isSharing ? 'Online' : isPreparingShare ? 'Preparing' : 'Idle'}
             </span>
-            {typeof latencyMs === 'number' ? (
-              <span className={`${isDark ? 'text-slate-400' : 'text-slate-500'} text-[11px]`}>
-                {latencyMs} ms
-              </span>
-            ) : null}
+            <span className={`text-[11px] px-2 py-1 rounded-full border ${qualityClass}`}>
+              {quality.label}
+              {typeof latencyMs === 'number' && latencyMs > 0 ? ` - ${latencyMs} ms` : ''}
+            </span>
           </div>
         </div>
 
@@ -1128,6 +1613,31 @@ export default function HostPage() {
             <aside className={`rounded-xl border p-3 overflow-y-auto space-y-3 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-slate-50'}`}>
               <div className={`rounded-lg border p-3 ${isDark ? 'border-slate-600 bg-[#202531]' : 'border-slate-300 bg-white'}`}>
                 <p className={`text-xs uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Session Controls</p>
+                <div className="mt-2">
+                  <label className={`text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                    Approval Policy
+                  </label>
+                  <select
+                    value={approvalPolicy}
+                    onChange={(event) => {
+                      const next = toText(event.target.value).toLowerCase()
+                      setApprovalPolicy(next || HOST_APPROVAL_POLICY.ALWAYS_ASK)
+                      setNotice(
+                        next === HOST_APPROVAL_POLICY.ALWAYS_ASK
+                          ? 'Host policy: always ask before approving.'
+                          : next === HOST_APPROVAL_POLICY.ASK_NEW_ONLY
+                            ? 'Host policy: ask only for new devices.'
+                            : 'Host policy: auto-approve trusted devices.',
+                        'info',
+                      )
+                    }}
+                    className={`mt-1 w-full rounded-md border px-2 py-1.5 text-xs ${isDark ? 'border-slate-600 bg-[#0f172a] text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}
+                  >
+                    <option value={HOST_APPROVAL_POLICY.ALWAYS_ASK}>Always ask</option>
+                    <option value={HOST_APPROVAL_POLICY.ASK_NEW_ONLY}>Ask new devices only</option>
+                    <option value={HOST_APPROVAL_POLICY.AUTO_APPROVE_TRUSTED}>Auto-approve trusted</option>
+                  </select>
+                </div>
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <button
                     onClick={() => openSourcePicker()}
@@ -1142,6 +1652,12 @@ export default function HostPage() {
                     className="col-span-2 bg-[#3a404d] hover:bg-[#4a5160] text-white px-3 py-2 rounded-md text-sm transition disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     Restart Share
+                  </button>
+                  <button
+                    onClick={() => setShowDiagnostics((current) => !current)}
+                    className="col-span-2 bg-[#3a404d] hover:bg-[#4a5160] text-white px-3 py-2 rounded-md text-sm transition"
+                  >
+                    {showDiagnostics ? 'Hide Diagnostics' : 'Show Diagnostics'}
                   </button>
                   <button
                     onClick={() => {
@@ -1172,19 +1688,87 @@ export default function HostPage() {
                 <p className={`mt-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Shortcut: press C to toggle control</p>
               </div>
 
+              {showDiagnostics ? (
+                <div className={`rounded-lg border p-3 text-xs ${isDark ? 'border-slate-600 bg-[#202531] text-slate-300' : 'border-slate-300 bg-white text-slate-700'}`}>
+                  <p>Phase: {sessionPhase}</p>
+                  <p>Signaling: {isSignalingActive ? 'connected' : 'waiting'}</p>
+                  <p>Peer: {isPeerConnected ? 'connected' : 'waiting'}</p>
+                  <p>Sharing: {isSharing ? 'active' : 'stopped'}</p>
+                  <p>Source: {toText(selectedSourceId) || 'auto'}</p>
+                  <button
+                    type="button"
+                    onClick={copyDiagnosticsSnapshot}
+                    className="mt-2 px-2.5 py-1 rounded border border-slate-500/50 text-xs"
+                  >
+                    Copy Snapshot
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadDiagnosticsSnapshot}
+                    className="mt-2 ml-2 px-2.5 py-1 rounded border border-slate-500/50 text-xs"
+                  >
+                    Download Snapshot
+                  </button>
+                  <div className="mt-3 space-y-1">
+                    <p className="font-semibold">Recent Audit Events</p>
+                    {hostAuditTrail.slice(0, 5).map((entry) => (
+                      <p key={entry.id} className={`${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                        {entry.event} - {entry.clientDisplayName || entry.clientDeviceId || entry.clientSocketId || 'unknown'} - {formatRelativeTime(entry.at)}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               {incomingRequests.length > 0 ? (
                 <div className={`rounded-lg border p-3 space-y-2 ${isDark ? 'border-slate-600 bg-[#202531]' : 'border-slate-300 bg-white'}`}>
                   <p className={`text-sm font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Connection Requests ({incomingRequests.length})</p>
                   {incomingRequests.map((request) => (
+                    (() => {
+                      const clientDeviceId = toText(request.clientDeviceId).trim()
+                      const pairing = knownPairings.find(
+                        (item) => toText(item?.peerDeviceId).trim() === clientDeviceId,
+                      )
+                      const isTrusted = Boolean(pairing)
+                      const status = requestDeviceInfo[clientDeviceId]
+                      const lastConnectedText = formatRelativeTime(pairing?.lastConnectedAt)
+                      const lastSeenText = formatRelativeTime(status?.lastSeenAt)
+                      const risk = buildRequestRiskSummary(request)
+                      return (
                     <div
                       key={request.clientSocketId}
                       className={`rounded-md border px-3 py-2 space-y-2 ${isDark ? 'border-slate-600 bg-[#262d3a]' : 'border-slate-300 bg-slate-50'}`}
                     >
                       <div>
-                        <p className="text-sm">{toText(request.clientDisplayName) || 'Unknown Client'}</p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm">{toText(request.clientDisplayName) || toText(status?.displayName) || 'Unknown Client'}</p>
+                          <span
+                            className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                              isTrusted
+                                ? (isDark
+                                    ? 'bg-emerald-700/40 border-emerald-500/40 text-emerald-200'
+                                    : 'bg-emerald-100 border-emerald-300 text-emerald-700')
+                                : (isDark
+                                    ? 'bg-amber-700/40 border-amber-500/40 text-amber-200'
+                                    : 'bg-amber-100 border-amber-300 text-amber-700')
+                            }`}
+                          >
+                            {isTrusted ? 'Trusted Device' : 'New Device'}
+                          </span>
+                        </div>
                         <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                           {toText(request.clientDeviceId) || toText(request.clientSocketId)}
                         </p>
+                        <div className={`mt-1 text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                          <p>Last room: {toText(pairing?.lastRoomId) || 'none'}</p>
+                          <p>Last connected: {lastConnectedText || 'first time'}</p>
+                          <p>Last seen: {lastSeenText || 'unknown'}</p>
+                          {risk.level === 'warning' ? (
+                            <p className={`${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+                              Risk: {risk.reasons.join(' ')}
+                            </p>
+                          ) : null}
+                        </div>
                       </div>
                       <div className="flex gap-2">
                         <button
@@ -1203,6 +1787,8 @@ export default function HostPage() {
                         </button>
                       </div>
                     </div>
+                      )
+                    })()
                   ))}
                 </div>
               ) : null}
@@ -1215,7 +1801,7 @@ export default function HostPage() {
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-red-500/30' : 'bg-red-400/40'}`} />
               </div>
               <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Connecting to remote device...</p>
-              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Preparing secure session automatically. Please wait a moment.</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{sessionPhaseLabel}</p>
             </div>
           )}
         </div>
@@ -1227,11 +1813,11 @@ export default function HostPage() {
             </p>
           ) : (
             <p className={`text-center text-sm animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              Connecting... please wait.
+              {sessionPhaseLabel}
             </p>
           )}
           <p className={`text-center text-sm ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
-            {toText(sessionNotice) || 'Keep remote control off until you verify the client identity.'}
+            {effectiveHostNotice || 'Keep remote control off until you verify the client identity.'}
           </p>
         </div>
       </div>
@@ -1278,6 +1864,37 @@ export default function HostPage() {
                 className={`px-3 py-1.5 rounded border text-xs ${isDark ? 'border-slate-600 text-slate-200' : 'border-slate-300 text-slate-700'}`}
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {riskConfirmRequest ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div className={`w-full max-w-md rounded-xl border p-4 ${isDark ? 'border-amber-500/40 bg-[#101a2f] text-slate-100' : 'border-amber-300 bg-white text-slate-800'}`}>
+            <h3 className="text-base font-semibold">Security Check Required</h3>
+            <p className={`mt-1 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+              {riskConfirmRequest.clientDisplayName} triggered risk signals:
+            </p>
+            <ul className={`mt-2 text-xs space-y-1 ${isDark ? 'text-amber-200' : 'text-amber-700'}`}>
+              {riskConfirmRequest.reasons.map((reason, index) => (
+                <li key={`${riskConfirmRequest.clientSocketId}-${index}`}>- {reason}</li>
+              ))}
+            </ul>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setRiskConfirmRequest(null)}
+                className="flex-1 px-3 py-2 rounded-md bg-[#495063] hover:bg-[#596176] text-white text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConnectionRequest(riskConfirmRequest.clientSocketId, true)}
+                className="flex-1 px-3 py-2 rounded-md bg-red-600 hover:bg-red-500 text-white text-sm"
+              >
+                Approve Anyway
               </button>
             </div>
           </div>

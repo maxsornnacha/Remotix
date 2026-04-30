@@ -6,8 +6,28 @@ import { useTheme } from '../../libs/theme'
 import { useAlerts } from '../../libs/alerts'
 import { api } from '../../libs/http'
 import { attachRtcDiagnostics, getRtcConfig } from '../../libs/rtc'
+import {
+  clearSessionResumeToken,
+  saveSessionResumeToken,
+} from '../../libs/session-resume'
+import {
+  createSessionEngine,
+  getConnectionQualityDescriptor,
+  getSessionPhaseMessage,
+  SESSION_PHASE,
+  SESSION_RECOVERY,
+} from '../../libs/session-engine'
 
 const socket = getSocket();
+const toPositiveInt = (value, fallback) => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return Math.floor(parsed)
+}
+const QUALITY_SAMPLE_COUNT = toPositiveInt(process.env.NEXT_PUBLIC_QUALITY_SAMPLE_COUNT, 2)
+const QUALITY_EMIT_COOLDOWN_MS = toPositiveInt(process.env.NEXT_PUBLIC_QUALITY_EMIT_COOLDOWN_MS, 6000)
+const QUALITY_POOR_RTT_MS = toPositiveInt(process.env.NEXT_PUBLIC_QUALITY_POOR_RTT_MS, 240)
+const QUALITY_FAIR_RTT_MS = toPositiveInt(process.env.NEXT_PUBLIC_QUALITY_FAIR_RTT_MS, 130)
 
 function WifiSignalIcon({ isDark }) {
   return (
@@ -50,7 +70,7 @@ export default function ClientPage() {
   const videoRef = useRef(null)
   const remoteViewportRef = useRef(null)
   const blackFrameCanvasRef = useRef(null)
-  const [sessionStatus, setSessionStatus] = useState('Connecting to host...')
+  const [sessionStatus, setSessionStatus] = useState('')
   const [isPointerLocked, setIsPointerLocked] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [lastInputEvent, setLastInputEvent] = useState('No input yet')
@@ -65,11 +85,11 @@ export default function ClientPage() {
   const [approvedRoomId, setApprovedRoomId] = useState('')
   const [dbUnavailableMessage, setDbUnavailableMessage] = useState('')
   const [remoteStreamRevision, setRemoteStreamRevision] = useState(0)
+  const [sessionPhase, setSessionPhase] = useState(SESSION_PHASE.IDLE)
+  const [showDiagnostics, setShowDiagnostics] = useState(false)
   const joinedRoomRef = useRef('')
   const pendingSignalsRef = useRef([])
-  const handshakeRetryTimeoutRef = useRef(null)
   const handshakeRetryCountRef = useRef(0)
-  const streamTimeoutRef = useRef(null)
   const autoExitTimeoutRef = useRef(null)
   const hasTriggeredExitRef = useRef(false)
   const detachRtcDiagnosticsRef = useRef(null)
@@ -81,6 +101,12 @@ export default function ClientPage() {
   const blackFrameHitsRef = useRef(0)
   const blackRefreshRequestedRef = useRef(false)
   const noFrameHitsRef = useRef(0)
+  const sessionEngineRef = useRef(null)
+  const lastPhaseToastRef = useRef('')
+  const qualityCandidateRef = useRef('')
+  const qualityCandidateHitsRef = useRef(0)
+  const lastEmittedQualityRef = useRef('')
+  const lastQualityEmitAtRef = useRef(0)
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
@@ -94,6 +120,40 @@ export default function ClientPage() {
     normal: 1,
     fast: 1.35,
   }
+
+  useEffect(() => {
+    sessionEngineRef.current = createSessionEngine({
+      onPhaseChange: (phase) => {
+        setSessionPhase(phase)
+        if (phase === SESSION_PHASE.RECOVERING) {
+          setStatus('Connection interrupted. Recovering automatically...')
+        }
+        if (
+          phase !== lastPhaseToastRef.current &&
+          (phase === SESSION_PHASE.RECOVERING ||
+            phase === SESSION_PHASE.LIVE ||
+            phase === SESSION_PHASE.ENDED)
+        ) {
+          lastPhaseToastRef.current = phase
+          const toastType =
+            phase === SESSION_PHASE.LIVE
+              ? 'success'
+              : phase === SESSION_PHASE.ENDED
+                ? 'error'
+                : 'info'
+          pushAlert(getSessionPhaseMessage(phase, 'client'), { type: toastType })
+        }
+      },
+      onTelemetry: (entry) => {
+        console.log('[client][session-engine]', entry)
+      },
+    })
+    sessionEngineRef.current.setPhase(SESSION_PHASE.REQUESTING)
+    return () => {
+      sessionEngineRef.current?.destroy()
+      sessionEngineRef.current = null
+    }
+  }, [])
 
   const shouldPushClientNotification = (text, type) => {
     if (!text) return false
@@ -117,6 +177,94 @@ export default function ClientPage() {
     const text = toText(message)
     setDbUnavailableMessage(text)
     if (text) pushAlert(text, { type: 'error' })
+  }
+
+  const copyDiagnosticsSnapshot = async () => {
+    const snapshot = {
+      schemaVersion: '1.0.0',
+      role: 'client',
+      phase: sessionPhase,
+      roomId: toText(roomId),
+      approvedRoomId: toText(approvedRoomId),
+      signalingConnected: isSignalingActive,
+      peerConnected: isPeerConnected,
+      streamActive: hasRemoteStream,
+      allowControl: canControlSession,
+      pointerLocked: isPointerLocked,
+      fullscreen: isFullscreen,
+      controlProfile: toText(controlProfile),
+      sourceId: '',
+      latencyMs,
+      status: toText(sessionStatus),
+      timestamp: new Date().toISOString(),
+    }
+
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+      setStatus('Clipboard API is unavailable in this environment.', 'error')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2))
+      setStatus('Diagnostics snapshot copied.', 'success')
+    } catch (_error) {
+      setStatus('Could not copy diagnostics snapshot.', 'error')
+    }
+  }
+
+  const downloadDiagnosticsSnapshot = () => {
+    const snapshot = {
+      schemaVersion: '1.0.0',
+      role: 'client',
+      phase: sessionPhase,
+      roomId: toText(roomId),
+      approvedRoomId: toText(approvedRoomId),
+      signalingConnected: isSignalingActive,
+      peerConnected: isPeerConnected,
+      streamActive: hasRemoteStream,
+      allowControl: canControlSession,
+      pointerLocked: isPointerLocked,
+      fullscreen: isFullscreen,
+      controlProfile: toText(controlProfile),
+      sourceId: '',
+      latencyMs,
+      status: toText(sessionStatus),
+      timestamp: new Date().toISOString(),
+    }
+    try {
+      const payload = JSON.stringify(snapshot, null, 2)
+      const blob = new Blob([payload], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `remotix-client-snapshot-${Date.now()}.json`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+      setStatus('Diagnostics snapshot downloaded.', 'success')
+    } catch (_error) {
+      setStatus('Could not download diagnostics snapshot.', 'error')
+    }
+  }
+
+  const updatePhaseFromEvent = (eventName) => {
+    const engine = sessionEngineRef.current
+    if (!engine) return
+    if (eventName === 'request-sent') {
+      engine.setPhase(SESSION_PHASE.REQUESTING)
+      return
+    }
+    if (eventName === 'room-joined') {
+      engine.setPhase(SESSION_PHASE.JOINED)
+      return
+    }
+    if (eventName === 'handshake-start') {
+      engine.setPhase(SESSION_PHASE.HANDSHAKING)
+      return
+    }
+    if (eventName === 'session-ended') {
+      engine.setPhase(SESSION_PHASE.ENDED)
+    }
   }
 
   const attachRemoteStream = async (stream) => {
@@ -231,14 +379,8 @@ export default function ClientPage() {
   const exitSessionFlow = (reason, delayMs = 1400) => {
     if (hasTriggeredExitRef.current) return
     hasTriggeredExitRef.current = true
-    if (handshakeRetryTimeoutRef.current) {
-      window.clearTimeout(handshakeRetryTimeoutRef.current)
-      handshakeRetryTimeoutRef.current = null
-    }
-    if (streamTimeoutRef.current) {
-      window.clearTimeout(streamTimeoutRef.current)
-      streamTimeoutRef.current = null
-    }
+    sessionEngineRef.current?.clearTimeoutTask('handshake-retry')
+    sessionEngineRef.current?.clearTimeoutTask('stream-timeout')
     setStatus(reason || 'Could not complete connection. Returning to home.', 'error')
     setSessionEndedReason(reason || 'Could not complete connection. Returning to home.')
     autoExitTimeoutRef.current = window.setTimeout(() => {
@@ -261,6 +403,23 @@ export default function ClientPage() {
       window.ipc.invoke('session:keep-awake', { enabled: false }).catch(() => {})
     }
   }, [])
+
+  useEffect(() => {
+    const activeRoomId = toText(approvedRoomId || roomId)
+    if (!activeRoomId) return
+    const writeToken = () => {
+      saveSessionResumeToken({
+        role: 'client',
+        roomId: activeRoomId,
+        deviceId: toText(deviceId),
+        displayName: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
+        targetHostDeviceId: toText(targetHostDeviceId),
+      })
+    }
+    writeToken()
+    const tokenInterval = window.setInterval(writeToken, 10_000)
+    return () => window.clearInterval(tokenInterval)
+  }, [approvedRoomId, roomId, deviceId, name, targetHostDeviceId])
 
   useEffect(() => {
     const handlePointerLockChange = () => {
@@ -320,10 +479,7 @@ export default function ClientPage() {
       setHasRemoteStream(true)
       lastRemoteStreamRef.current = stream
       setRemoteStreamRevision((current) => current + 1)
-      if (streamTimeoutRef.current) {
-        window.clearTimeout(streamTimeoutRef.current)
-        streamTimeoutRef.current = null
-      }
+      sessionEngineRef.current?.clearTimeoutTask('stream-timeout')
       const videoTrack = stream.getVideoTracks?.()[0]
       const settings = videoTrack?.getSettings?.() || {}
       console.log('[client][stream] received', {
@@ -345,6 +501,7 @@ export default function ClientPage() {
       attachRemoteStream(stream).then((ok) => {
         if (ok) {
           setHasRemoteStream(true)
+          sessionEngineRef.current?.markHealthy()
           setStatus('Live stream ready. Click on video to control.', 'success')
           return
         }
@@ -376,24 +533,35 @@ export default function ClientPage() {
 
     peer.on('close', () => {
       setIsPeerConnected(false)
-      reconnectSession()
+      const didSchedule = sessionEngineRef.current?.scheduleRecovery(
+        SESSION_RECOVERY.PEER,
+        reconnectSession,
+      )
+      if (!didSchedule) {
+        exitSessionFlow('Connection dropped repeatedly. Returning to home.')
+      }
     })
 
     peer.on('connect', () => {
       setIsPeerConnected(true)
+      sessionEngineRef.current?.setPhase(SESSION_PHASE.HANDSHAKING)
     })
 
     peerRef.current = peer
     detachRtcDiagnosticsRef.current = attachRtcDiagnostics(peer, 'client')
-    if (streamTimeoutRef.current) {
-      window.clearTimeout(streamTimeoutRef.current)
-    }
-    streamTimeoutRef.current = window.setTimeout(() => {
+    sessionEngineRef.current?.setTimeoutTask('stream-timeout', 18000, () => {
       if (!videoRef.current?.srcObject) {
+        const didSchedule = sessionEngineRef.current?.scheduleRecovery(
+          SESSION_RECOVERY.STREAM,
+          reconnectSession,
+        )
+        if (!didSchedule) {
+          exitSessionFlow('Video stream recovery exceeded retry limit.')
+          return
+        }
         setStatus('Video took too long to arrive. Reconnecting automatically...', 'error')
-        reconnectSession()
       }
-    }, 18000)
+    })
 
     if (pendingSignalsRef.current.length > 0) {
       pendingSignalsRef.current.forEach((signalPayload) => {
@@ -416,16 +584,14 @@ export default function ClientPage() {
           exitSessionFlow('Host is not ready for this room. Returning to home.')
           return
         }
-        if (handshakeRetryTimeoutRef.current) {
-          window.clearTimeout(handshakeRetryTimeoutRef.current)
-        }
-        handshakeRetryTimeoutRef.current = window.setTimeout(() => {
+        sessionEngineRef.current?.setTimeoutTask('handshake-retry', 1200, () => {
           announceClientReady(targetRoomId)
-        }, 1200)
+        })
         setStatus(response?.message || 'Waiting for host readiness...')
         return
       }
       handshakeRetryCountRef.current = 0
+      sessionEngineRef.current?.clearTimeoutTask('handshake-retry')
       console.log('[client][handshake] client-ready acknowledged', response)
       setStatus('Joined room. Waiting for host to start connection...')
     })
@@ -455,6 +621,7 @@ export default function ClientPage() {
         }
         joinedRoomRef.current = targetRoomId
         setIsSignalingActive(true)
+        updatePhaseFromEvent('room-joined')
         console.log('[client][join-room] success', response)
         announceClientReady(targetRoomId)
       })
@@ -471,6 +638,7 @@ export default function ClientPage() {
 
       console.log('🟢 Client socket connected. Requesting access for room:', roomId);
       setStatus('Sending request to host...')
+      updatePhaseFromEvent('request-sent')
       socket.emit('get-room-host-meta', roomId, (meta) => {
         if (meta?.exists) {
           setHostMeta(meta)
@@ -510,6 +678,7 @@ export default function ClientPage() {
       const acceptedRoomId = payload?.roomId || roomId
       setApprovedRoomId(acceptedRoomId)
       setStatus('Host approved. Opening remote screen...', 'success')
+      updatePhaseFromEvent('room-joined')
       joinClientRoom(acceptedRoomId)
     })
 
@@ -536,9 +705,16 @@ export default function ClientPage() {
     })
 
     socket.on('disconnect', () => {
-      setStatus('Connection lost. Attempting automatic recovery...', 'error')
       setIsSignalingActive(false)
-      reconnectSession()
+      const didSchedule = sessionEngineRef.current?.scheduleRecovery(
+        SESSION_RECOVERY.SOCKET,
+        reconnectSession,
+      )
+      if (!didSchedule) {
+        exitSessionFlow('Socket connection dropped repeatedly. Returning to home.')
+        return
+      }
+      setStatus('Connection lost. Attempting automatic recovery...', 'error')
     })
 
     socket.on('connect_error', () => {
@@ -548,6 +724,7 @@ export default function ClientPage() {
     socket.on('reconnect', () => {
       setStatus('Connection restored. Rejoining session...', 'success')
       setIsSignalingActive(true)
+      updatePhaseFromEvent('room-joined')
       reconnectSession()
     })
 
@@ -559,6 +736,7 @@ export default function ClientPage() {
       }
       console.log('[client][handshake] start-handshake received', payload)
       setIsSignalingActive(true)
+      updatePhaseFromEvent('handshake-start')
       createPeerConnection(peerSocketId, false)
       setStatus('Receiving host screen...')
     })
@@ -574,16 +752,13 @@ export default function ClientPage() {
     });
 
     socket.on('session-ended', (payload) => {
+      updatePhaseFromEvent('session-ended')
       showSessionEnded(payload?.message || 'Host ended the session.')
     })
   
     return () => {
-      if (handshakeRetryTimeoutRef.current) {
-        window.clearTimeout(handshakeRetryTimeoutRef.current)
-      }
-      if (streamTimeoutRef.current) {
-        window.clearTimeout(streamTimeoutRef.current)
-      }
+      sessionEngineRef.current?.clearTimeoutTask('handshake-retry')
+      sessionEngineRef.current?.clearTimeoutTask('stream-timeout')
       if (autoExitTimeoutRef.current) {
         window.clearTimeout(autoExitTimeoutRef.current)
       }
@@ -889,9 +1064,27 @@ export default function ClientPage() {
         const rttSeconds = Number(selected?.currentRoundTripTime || 0)
         if (!rttSeconds) return
         const rttMs = rttSeconds * 1000
-        const level = rttMs > 240 ? 'poor' : rttMs > 130 ? 'fair' : 'good'
+        const level = rttMs > QUALITY_POOR_RTT_MS ? 'poor' : rttMs > QUALITY_FAIR_RTT_MS ? 'fair' : 'good'
         setLatencyMs(Math.round(rttMs))
+        if (qualityCandidateRef.current === level) {
+          qualityCandidateHitsRef.current += 1
+        } else {
+          qualityCandidateRef.current = level
+          qualityCandidateHitsRef.current = 1
+        }
+
+        const isWorseningToPoor = level === 'poor' && lastEmittedQualityRef.current !== 'poor'
+        const hasEnoughSamples = qualityCandidateHitsRef.current >= QUALITY_SAMPLE_COUNT
+        const now = Date.now()
+        const cooldownPassed = now - lastQualityEmitAtRef.current >= QUALITY_EMIT_COOLDOWN_MS
+
+        if (!isWorseningToPoor && !hasEnoughSamples) return
+        if (!cooldownPassed && level === lastEmittedQualityRef.current) return
+        if (!cooldownPassed && !isWorseningToPoor) return
+
         socket.emit('client-network-quality', { roomId: room, level, rttMs })
+        lastEmittedQualityRef.current = level
+        lastQualityEmitAtRef.current = now
       } catch (_error) {
         // Ignore stats error and retry next interval.
       }
@@ -931,6 +1124,7 @@ export default function ClientPage() {
     blackFrameHitsRef.current = 0
     blackRefreshRequestedRef.current = false
     noFrameHitsRef.current = 0
+    clearSessionResumeToken()
 
     router.push('/home')
   }
@@ -953,13 +1147,29 @@ export default function ClientPage() {
   ]
   const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'stream')
   const isClientDetailReady = requiredClientSteps.every((step) => step.done)
+  const sessionPhaseLabel = getSessionPhaseMessage(sessionPhase, 'client')
+  const effectiveSessionStatus = toText(sessionStatus) || sessionPhaseLabel
+  const quality = getConnectionQualityDescriptor(latencyMs, sessionPhase)
+  const qualityClass = quality.tone === 'healthy'
+    ? (isDark ? 'bg-emerald-700/30 border-emerald-500/40 text-emerald-200' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
+    : quality.tone === 'warning'
+      ? (isDark ? 'bg-amber-700/30 border-amber-500/40 text-amber-200' : 'bg-amber-100 border-amber-300 text-amber-700')
+      : quality.tone === 'critical'
+        ? (isDark ? 'bg-red-700/30 border-red-500/40 text-red-200' : 'bg-red-100 border-red-300 text-red-700')
+        : (isDark ? 'bg-slate-700/40 border-slate-500/40 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700')
 
   useEffect(() => {
-    if (!roomId || isClientDetailReady) return
-    const timeoutId = window.setTimeout(() => {
+    const engine = sessionEngineRef.current
+    if (!engine || !roomId || isClientDetailReady) {
+      engine?.clearTimeoutTask('connect-timeout')
+      return
+    }
+    engine.setTimeoutTask('connect-timeout', 25000, () => {
       exitSessionFlow('Connection timed out. Returning to home.')
-    }, 25000)
-    return () => window.clearTimeout(timeoutId)
+    })
+    return () => {
+      engine.clearTimeoutTask('connect-timeout')
+    }
   }, [roomId, isClientDetailReady])
 
   if (sessionEndedReason) {
@@ -1033,11 +1243,10 @@ export default function ClientPage() {
             }`}>
               {isPointerLocked ? 'Control On' : canControlSession ? 'Approved' : 'Pending'}
             </span>
-            {typeof latencyMs === 'number' ? (
-              <span className={`${isDark ? 'text-slate-400' : 'text-slate-500'} text-[11px]`}>
-                {latencyMs} ms
-              </span>
-            ) : null}
+            <span className={`text-[11px] px-2 py-1 rounded-full border ${qualityClass}`}>
+              {quality.label}
+              {typeof latencyMs === 'number' && latencyMs > 0 ? ` - ${latencyMs} ms` : ''}
+            </span>
           </div>
         </div>
 
@@ -1105,6 +1314,12 @@ export default function ClientPage() {
                   >
                     {isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
                   </button>
+                  <button
+                    onClick={() => setShowDiagnostics((current) => !current)}
+                    className="col-span-2 px-3 py-2 rounded-md text-sm transition bg-[#3a404d] hover:bg-[#4a5160] text-white"
+                  >
+                    {showDiagnostics ? 'Hide Diagnostics' : 'Show Diagnostics'}
+                  </button>
                   <label className="col-span-2 text-xs text-left">
                     <span className={`${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Control sensitivity</span>
                     <select
@@ -1127,7 +1342,7 @@ export default function ClientPage() {
               </div>
 
               <div className={`rounded-lg border p-3 text-sm ${isDark ? 'border-slate-600 bg-[#202531] text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}>
-                <p>{toText(sessionStatus)}</p>
+                <p>{effectiveSessionStatus}</p>
                 <p className={`mt-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
                   {isPointerLocked
                     ? 'Control mode active (Esc to unlock).'
@@ -1137,6 +1352,30 @@ export default function ClientPage() {
                 </p>
                 <p className={`mt-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Last input: {toText(lastInputEvent)}</p>
               </div>
+
+              {showDiagnostics ? (
+                <div className={`rounded-lg border p-3 text-xs ${isDark ? 'border-slate-600 bg-[#202531] text-slate-300' : 'border-slate-300 bg-white text-slate-700'}`}>
+                  <p>Phase: {sessionPhase}</p>
+                  <p>Signaling: {isSignalingActive ? 'connected' : 'waiting'}</p>
+                  <p>Peer: {isPeerConnected ? 'connected' : 'waiting'}</p>
+                  <p>Remote stream: {hasRemoteStream ? 'present' : 'missing'}</p>
+                  <p>Room: {toText(approvedRoomId || roomId) || '-'}</p>
+                  <button
+                    type="button"
+                    onClick={copyDiagnosticsSnapshot}
+                    className="mt-2 px-2.5 py-1 rounded border border-slate-500/50 text-xs"
+                  >
+                    Copy Snapshot
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadDiagnosticsSnapshot}
+                    className="mt-2 ml-2 px-2.5 py-1 rounded border border-slate-500/50 text-xs"
+                  >
+                    Download Snapshot
+                  </button>
+                </div>
+              ) : null}
 
               <div className={`rounded-lg border p-3 text-xs ${isDark ? 'border-slate-600 bg-[#202531] text-slate-400' : 'border-slate-300 bg-white text-slate-600'}`}>
                 Tip: Keep control mode off when you are only observing the host screen.
@@ -1151,7 +1390,7 @@ export default function ClientPage() {
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-blue-500/30' : 'bg-blue-400/40'}`} />
               </div>
               <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Connecting to remote device...</p>
-              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Preparing secure session automatically. Please wait a moment.</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{sessionPhaseLabel}</p>
             </div>
           )}
         </div>
@@ -1159,11 +1398,11 @@ export default function ClientPage() {
         <div className={`px-5 pb-4 pt-2 border-t ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
           {isClientDetailReady ? (
             <p className={`text-center text-sm transition-colors ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              {hasRemoteStream ? 'Receiving host stream.' : 'Waiting for host stream.'}
+              {hasRemoteStream ? 'Receiving host stream.' : effectiveSessionStatus}
             </p>
           ) : (
             <p className={`text-center text-sm animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              Connecting... please wait.
+              {sessionPhaseLabel}
             </p>
           )}
         </div>

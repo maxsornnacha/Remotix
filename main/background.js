@@ -265,7 +265,7 @@ ipcMain.handle("session:keep-awake", async (_event, payload = {}) => {
       keepAwakeRequestCount > 0 &&
       (!keepAwakeBlockerId || !powerSaveBlocker.isStarted(keepAwakeBlockerId))
     ) {
-      keepAwakeBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+      keepAwakeBlockerId = powerSaveBlocker.start("prevent-display-sleep");
     }
   } else {
     keepAwakeRequestCount = Math.max(0, keepAwakeRequestCount - 1);
