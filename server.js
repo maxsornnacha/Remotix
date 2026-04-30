@@ -34,6 +34,23 @@ const RESUME_RATE_LIMIT_SWEEP_MS = 60 * 1000;
 const HOST_AUDIT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const HOST_AUDIT_RATE_LIMIT_MAX_ATTEMPTS = 120;
 const HOST_AUDIT_RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+const HOST_AUDIT_RATE_LIMIT_SWEEP_MS = 60 * 1000;
+const HOST_AUDIT_MAX_RAW_BYTES = Number(
+  process.env.HOST_AUDIT_MAX_RAW_BYTES || 4096,
+);
+const HOST_AUDIT_INGEST_KEY =
+  typeof process.env.HOST_AUDIT_INGEST_KEY === "string"
+    ? process.env.HOST_AUDIT_INGEST_KEY.trim()
+    : "";
+const HOST_AUDIT_STORE_RAW = (() => {
+  const raw =
+    typeof process.env.HOST_AUDIT_STORE_RAW === "string"
+      ? process.env.HOST_AUDIT_STORE_RAW.trim().toLowerCase()
+      : "";
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") return true;
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
+  return process.env.NODE_ENV !== "production";
+})();
 let runtimeStore = null;
 const roomHandshakeState = new Map();
 const resumePreflightRateState = new Map();
@@ -110,7 +127,7 @@ setInterval(() => {
       hostAuditRateState.delete(key);
     }
   }
-}, RESUME_RATE_LIMIT_SWEEP_MS).unref();
+}, HOST_AUDIT_RATE_LIMIT_SWEEP_MS).unref();
 
 const requireDb = (res) => {
   if (isDbConnected()) return true;
@@ -142,9 +159,21 @@ const getClientIp = (req) => {
 
 const ensureRequestId = (req, res) => {
   const incoming = text(req.headers["x-request-id"]);
-  const requestId = incoming || crypto.randomUUID();
+  const correlationId = text(req.headers["x-correlation-id"]);
+  const requestId = incoming || correlationId || crypto.randomUUID();
   res.setHeader("X-Request-Id", requestId);
   return requestId;
+};
+
+const safeEqualText = (a, b) => {
+  const x = Buffer.from(text(a));
+  const y = Buffer.from(text(b));
+  if (!x.length || x.length !== y.length) return false;
+  try {
+    return crypto.timingSafeEqual(x, y);
+  } catch (_error) {
+    return false;
+  }
 };
 
 const logResumeEvent = ({
@@ -647,6 +676,7 @@ app.post("/audit/host-connection-events", async (req, res) => {
   const safeRoomId = clamp(payload.roomId, 128);
   const safeEvent = clamp(payload.event, 96);
   const safeClientDeviceId = clamp(payload.clientDeviceId, 128);
+  const ingestKeyHeader = text(req.headers["x-audit-ingest-key"]);
 
   const reject = (status, message, reasonCode, extra = {}) => {
     const retryAfterSec = Number(extra.retryAfterSec || 0);
@@ -679,6 +709,10 @@ app.post("/audit/host-connection-events", async (req, res) => {
     );
   }
 
+  if (HOST_AUDIT_INGEST_KEY && !safeEqualText(ingestKeyHeader, HOST_AUDIT_INGEST_KEY)) {
+    return reject(401, "Unauthorized audit ingest request.", "UNAUTHORIZED");
+  }
+
   const rateKey = `${ip}|${safeRoomId || "unknown-room"}`;
   const rateCheck = consumeGenericRateLimit(
     hostAuditRateState,
@@ -708,6 +742,24 @@ app.post("/audit/host-connection-events", async (req, res) => {
     : [];
 
   const userAgent = clamp(req.headers["user-agent"], 512);
+  const rawSerialized = (() => {
+    try {
+      return JSON.stringify(payload);
+    } catch (_error) {
+      return "";
+    }
+  })();
+  const rawTooLarge =
+    rawSerialized && Buffer.byteLength(rawSerialized, "utf8") > HOST_AUDIT_MAX_RAW_BYTES;
+  const rawPayload =
+    HOST_AUDIT_STORE_RAW && !rawTooLarge
+      ? payload
+      : HOST_AUDIT_STORE_RAW && rawTooLarge
+        ? {
+            truncated: true,
+            bytes: Buffer.byteLength(rawSerialized || "", "utf8"),
+          }
+        : null;
   const doc = {
     externalId: clamp(payload.id, 128),
     event: safeEvent,
@@ -725,7 +777,7 @@ app.post("/audit/host-connection-events", async (req, res) => {
     receivedAt: new Date(),
     ip: clamp(ip, 96),
     userAgent,
-    raw: payload,
+    raw: rawPayload,
   };
 
   try {
