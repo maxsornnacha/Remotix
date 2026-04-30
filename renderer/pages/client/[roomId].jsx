@@ -586,14 +586,6 @@ export default function ClientPage() {
     }, [roomId, router, deviceId, name, targetHostDeviceId, preapproved]);
 
   useEffect(() => {
-    if (!roomId || isClientDetailReady) return
-    const timeoutId = window.setTimeout(() => {
-      exitSessionFlow('Connection timed out. Returning to home.')
-    }, 25000)
-    return () => window.clearTimeout(timeoutId)
-  }, [roomId, isClientDetailReady])
-
-  useEffect(() => {
     const leaveCurrentSession = () => {
       const activeRoomId = toText(approvedRoomId || joinedRoomRef.current || roomId)
       if (!activeRoomId) return
@@ -911,6 +903,14 @@ export default function ClientPage() {
   const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'stream')
   const pendingClientStep = requiredClientSteps.find((step) => !step.done)?.label || 'Finalizing'
   const isClientDetailReady = requiredClientSteps.every((step) => step.done)
+
+  useEffect(() => {
+    if (!roomId || isClientDetailReady) return
+    const timeoutId = window.setTimeout(() => {
+      exitSessionFlow('Connection timed out. Returning to home.')
+    }, 25000)
+    return () => window.clearTimeout(timeoutId)
+  }, [roomId, isClientDetailReady])
 
   if (sessionEndedReason) {
     return (
