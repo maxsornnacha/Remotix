@@ -987,15 +987,25 @@ export default function ClientPage() {
             </aside>
             </div>
           ) : (
-            <div className={`h-full rounded-xl border flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
-              <div className="h-12 w-12 rounded-full border-4 border-slate-500/40 border-t-red-500 animate-spin" />
-              <p className={`mt-4 text-lg font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session...</p>
+            <div className={`h-full rounded-2xl border backdrop-blur-sm flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]/90' : 'border-slate-200 bg-white/95'}`}>
+              <div className="relative">
+                <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-blue-400' : 'border-slate-300 border-t-blue-500'}`} />
+                <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-blue-500/30' : 'bg-blue-400/40'}`} />
+              </div>
+              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session</p>
               <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Current step: {pendingClientStep}</p>
-              <div className="mt-4 space-y-1 text-sm">
+              <div className="mt-5 grid w-full max-w-sm gap-2 text-sm">
                 {clientConnectionSteps.map((step) => (
-                  <p key={step.key} className={step.done ? (isDark ? 'text-emerald-300' : 'text-emerald-700') : (isDark ? 'text-slate-400' : 'text-slate-500')}>
+                  <div
+                    key={step.key}
+                    className={`rounded-lg border px-3 py-2 text-left transition-all ${
+                      step.done
+                        ? (isDark ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-700')
+                        : (isDark ? 'border-slate-600 bg-slate-800/60 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-600')
+                    }`}
+                  >
                     {step.done ? 'Done' : 'Waiting'} - {step.label}
-                  </p>
+                  </div>
                 ))}
               </div>
             </div>
@@ -1004,11 +1014,11 @@ export default function ClientPage() {
 
         <div className={`px-5 pb-4 pt-2 border-t ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
           {isClientDetailReady ? (
-            <p className={`text-center text-sm ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            <p className={`text-center text-sm transition-colors ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
               {hasRemoteStream ? 'Receiving host stream.' : 'Waiting for host stream.'}
             </p>
           ) : (
-            <p className={`text-center text-sm ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            <p className={`text-center text-sm animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
               Connecting... please wait.
             </p>
           )}

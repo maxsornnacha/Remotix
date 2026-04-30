@@ -78,6 +78,7 @@ export default function HomePage() {
   const [isRespondingRequest, setIsRespondingRequest] = useState(false)
   const [pendingOutboundAddress, setPendingOutboundAddress] = useState('')
   const [isPolicyModalOpen, setIsPolicyModalOpen] = useState(false)
+  const [isPolicyConsentPromptOpen, setIsPolicyConsentPromptOpen] = useState(false)
   const [isRegeneratingDeviceId, setIsRegeneratingDeviceId] = useState(false)
   const [permissionGate, setPermissionGate] = useState({
     checking: true,
@@ -366,8 +367,18 @@ export default function HomePage() {
 
   const ensurePolicyAccepted = () => {
     if (hasAcceptedPolicy) return true
+    setIsPolicyConsentPromptOpen(true)
     setFeedbackWithAlert('Please accept the usage policy before starting a session.', 'error')
     return false
+  }
+
+  const acceptPolicyConsent = () => {
+    setHasAcceptedPolicy(true)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('remotix-policy-consent', 'accepted')
+    }
+    setIsPolicyConsentPromptOpen(false)
+    setFeedbackWithAlert('Policy accepted. You can continue the connection flow.', 'success')
   }
 
   const requestConnectionToAddress = (targetAddress) => {
@@ -492,6 +503,9 @@ export default function HomePage() {
   const respondIncomingRequest = (approved) => {
     if (!permissionGate.allGranted) {
       setFeedbackWithAlert('Required permissions are not granted yet.', 'error')
+      return
+    }
+    if (approved && !ensurePolicyAccepted()) {
       return
     }
     if (!incomingRequest?.clientSocketId) return
@@ -996,6 +1010,46 @@ export default function HomePage() {
                 Allow
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isPolicyConsentPromptOpen ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 p-4 animate-[modalBackdropIn_220ms_ease-out]">
+          <div className={`w-full max-w-md rounded-xl border p-5 shadow-2xl animate-[modalPanelIn_260ms_cubic-bezier(0.2,0.8,0.2,1)] ${isDark ? 'border-slate-600 bg-[#101a2f]' : 'border-slate-300 bg-white'}`}>
+            <p className={`text-xs uppercase tracking-widest ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Policy Required</p>
+            <h3 className={`mt-2 text-lg font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+              Accept policy before approving remote access
+            </h3>
+            <p className={`mt-3 text-sm ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+              A client is requesting remote access. You must accept the Remote Access Policy first.
+            </p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPolicyConsentPromptOpen(false)}
+                className="px-3 py-2 rounded-md bg-slate-600 hover:bg-slate-500 text-white text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={acceptPolicyConsent}
+                className="px-3 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-sm"
+              >
+                I Accept
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setIsPolicyConsentPromptOpen(false)
+                setIsPolicyModalOpen(true)
+              }}
+              className="mt-3 text-xs text-blue-400 underline underline-offset-2"
+            >
+              Read full policy
+            </button>
           </div>
         </div>
       ) : null}

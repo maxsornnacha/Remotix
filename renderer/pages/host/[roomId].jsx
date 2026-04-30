@@ -76,6 +76,8 @@ export default function HostPage() {
   const [isSharing, setIsSharing] = useState(false)
   const [isPreparingShare, setIsPreparingShare] = useState(false)
   const [incomingRequests, setIncomingRequests] = useState([])
+  const [hasAcceptedPolicy, setHasAcceptedPolicy] = useState(false)
+  const [isPolicyConsentPromptOpen, setIsPolicyConsentPromptOpen] = useState(false)
   const [dbUnavailableMessage, setDbUnavailableMessage] = useState('')
   const [isReselectingShare, setIsReselectingShare] = useState(false)
   const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false)
@@ -155,6 +157,22 @@ export default function HostPage() {
     const text = toText(message)
     setDbUnavailableMessage(text)
     if (text) pushAlert(text, { type: 'error' })
+  }
+
+  const ensurePolicyAccepted = () => {
+    if (hasAcceptedPolicy) return true
+    setIsPolicyConsentPromptOpen(true)
+    setNotice('Please accept the usage policy before approving remote access.', 'error')
+    return false
+  }
+
+  const acceptPolicyConsent = () => {
+    setHasAcceptedPolicy(true)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('remotix-policy-consent', 'accepted')
+    }
+    setIsPolicyConsentPromptOpen(false)
+    setNotice('Policy accepted. You can now approve incoming requests.', 'success')
   }
 
   const showSessionEnded = (reason) => {
@@ -501,6 +519,7 @@ export default function HostPage() {
 
     if (typeof window !== 'undefined') {
       const policyConsent = window.localStorage.getItem('remotix-policy-consent')
+      setHasAcceptedPolicy(policyConsent === 'accepted')
       // Only block explicit rejection. Missing value can happen during cross-device
       // routing or stale local storage sync and should not hard-bounce the host page.
       if (policyConsent === 'rejected') {
@@ -569,6 +588,9 @@ export default function HostPage() {
         const withoutDup = prev.filter((item) => item.clientSocketId !== request.clientSocketId)
         return [...withoutDup, request]
       })
+      if (!hasAcceptedPolicy) {
+        setIsPolicyConsentPromptOpen(true)
+      }
       setNotice(`Incoming request from ${request.clientDisplayName || 'Unknown Client'}.`)
     })
 
@@ -637,7 +659,7 @@ export default function HostPage() {
       socket.off('session-ended');
       socket.off('client-network-quality');
     }
-  }, [roomId, allowControl, router])
+  }, [roomId, allowControl, router, hasAcceptedPolicy])
 
   useEffect(() => {
     if (!deviceId) return
@@ -879,6 +901,9 @@ export default function HostPage() {
   }
 
   const handleConnectionRequest = async (clientSocketId, approved) => {
+    if (approved && !ensurePolicyAccepted()) {
+      return
+    }
     if (approved) {
       const isReady = await ensureScreenSharingStarted()
       if (!isReady) {
@@ -1075,15 +1100,25 @@ export default function HostPage() {
             </aside>
             </div>
           ) : (
-            <div className={`h-full rounded-xl border flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
-              <div className={`h-12 w-12 rounded-full border-4 border-slate-500/40 border-t-red-500 animate-spin`} />
-              <p className={`mt-4 text-lg font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session...</p>
+            <div className={`h-full rounded-2xl border backdrop-blur-sm flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]/90' : 'border-slate-200 bg-white/95'}`}>
+              <div className="relative">
+                <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-red-400' : 'border-slate-300 border-t-red-500'}`} />
+                <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-red-500/30' : 'bg-red-400/40'}`} />
+              </div>
+              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session</p>
               <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Current step: {pendingHostStep}</p>
-              <div className="mt-4 space-y-1 text-sm">
+              <div className="mt-5 grid w-full max-w-sm gap-2 text-sm">
                 {hostConnectionSteps.map((step) => (
-                  <p key={step.key} className={step.done ? (isDark ? 'text-emerald-300' : 'text-emerald-700') : (isDark ? 'text-slate-400' : 'text-slate-500')}>
+                  <div
+                    key={step.key}
+                    className={`rounded-lg border px-3 py-2 text-left transition-all ${
+                      step.done
+                        ? (isDark ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-700')
+                        : (isDark ? 'border-slate-600 bg-slate-800/60 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-600')
+                    }`}
+                  >
                     {step.done ? 'Done' : 'Waiting'} - {step.label}
-                  </p>
+                  </div>
                 ))}
               </div>
             </div>
@@ -1092,11 +1127,11 @@ export default function HostPage() {
 
         <div className={`px-5 pb-4 pt-2 border-t space-y-1.5 ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
           {isHostDetailReady ? (
-            <p className={`text-center text-sm ${isDark ? 'text-gray-400' : 'text-slate-600'}`}>
+            <p className={`text-center text-sm transition-colors ${isDark ? 'text-gray-400' : 'text-slate-600'}`}>
               {isSharing ? 'You are sharing your screen with approved clients.' : 'No active screen sharing until you approve a request.'}
             </p>
           ) : (
-            <p className={`text-center text-sm ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+            <p className={`text-center text-sm animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
               Connecting... please wait.
             </p>
           )}
@@ -1154,6 +1189,35 @@ export default function HostPage() {
         </div>
       ) : null}
       <canvas ref={blackFrameCanvasRef} className="hidden" />
+      {isPolicyConsentPromptOpen ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+          <div className={`w-full max-w-md rounded-xl border p-5 shadow-2xl ${isDark ? 'border-slate-600 bg-[#101a2f]' : 'border-slate-300 bg-white'}`}>
+            <p className={`text-xs uppercase tracking-widest ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Policy Required</p>
+            <h3 className={`mt-2 text-lg font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+              Accept policy before approving access
+            </h3>
+            <p className={`mt-3 text-sm ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+              Host must accept the Remote Access Policy once before allowing client connections.
+            </p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPolicyConsentPromptOpen(false)}
+                className="px-3 py-2 rounded-md bg-slate-600 hover:bg-slate-500 text-white text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={acceptPolicyConsent}
+                className="px-3 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-sm"
+              >
+                I Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
