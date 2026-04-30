@@ -28,6 +28,26 @@ const deviceSchema = new mongoose.Schema(
 
 const Device = mongoose.models.Device || mongoose.model('Device', deviceSchema);
 
+const resumeTokenSchema = new mongoose.Schema(
+  {
+    tokenId: { type: String, required: true, unique: true, index: true },
+    role: { type: String, enum: ['host', 'client'], required: true },
+    roomId: { type: String, required: true, index: true },
+    deviceId: { type: String, required: true, index: true },
+    targetHostDeviceId: { type: String, default: '' },
+    expiresAt: { type: Date, required: true, index: true },
+    consumedAt: { type: Date, default: null },
+    revokedAt: { type: Date, default: null },
+    isConsumed: { type: Boolean, default: false },
+    isRevoked: { type: Boolean, default: false },
+    status: { type: String, default: '' },
+  },
+  { timestamps: true, strict: false },
+);
+
+const ResumeToken =
+  mongoose.models.ResumeToken || mongoose.model('ResumeToken', resumeTokenSchema);
+
 const connectDb = async () => {
   const uri = process.env.MONGODB_URI;
   if (!uri) {
@@ -50,6 +70,7 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 module.exports = {
   Pairing,
   Device,
+  ResumeToken,
   connectDb,
   isDbConnected,
 };

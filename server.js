@@ -5,7 +5,7 @@ const http = require("http");
 const crypto = require("crypto");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const { Pairing, Device, connectDb, isDbConnected } = require("./db");
+const { Pairing, Device, ResumeToken, connectDb, isDbConnected } = require("./db");
 const { createRuntimeStore } = require("./runtimeStore");
 
 const app = express();
@@ -76,6 +76,32 @@ const requireDb = (res) => {
   return false;
 };
 
+const text = (value) =>
+  typeof value === "string" || typeof value === "number"
+    ? String(value).trim()
+    : "";
+
+const fail = (res, status, message, reasonCode) =>
+  res.status(status).json({
+    ok: false,
+    message,
+    reasonCode,
+  });
+
+const isTokenConsumed = (tokenDoc) => {
+  if (!tokenDoc) return false;
+  if (tokenDoc.isConsumed === true) return true;
+  if (tokenDoc.consumedAt) return true;
+  return text(tokenDoc.status).toLowerCase() === "consumed";
+};
+
+const isTokenRevoked = (tokenDoc) => {
+  if (!tokenDoc) return false;
+  if (tokenDoc.isRevoked === true) return true;
+  if (tokenDoc.revokedAt) return true;
+  return text(tokenDoc.status).toLowerCase() === "revoked";
+};
+
 app.get("/status", (req, res) => {
   Promise.resolve(getStore().countActiveRooms())
     .then((rooms) => {
@@ -105,6 +131,133 @@ app.post("/sessions", (req, res) => {
     .catch(() => {
       res.status(500).json({ message: "Could not start session" });
     });
+});
+
+app.post("/sessions/resume/preflight", async (req, res) => {
+  if (!requireDb(res)) {
+    return fail(
+      res,
+      503,
+      "Resume service is temporarily unavailable.",
+      "UPSTREAM_UNAVAILABLE",
+    );
+  }
+
+  const tokenId = text(req.body?.tokenId);
+  const role = text(req.body?.role).toLowerCase();
+  const roomId = text(req.body?.roomId);
+  const deviceId = text(req.body?.deviceId);
+  const targetHostDeviceId = text(req.body?.targetHostDeviceId);
+
+  if (!tokenId || !role || !roomId || !deviceId) {
+    return fail(
+      res,
+      400,
+      "tokenId, role, roomId and deviceId are required.",
+      "INVALID_REQUEST",
+    );
+  }
+  if (role !== "host" && role !== "client") {
+    return fail(
+      res,
+      400,
+      "role must be either host or client.",
+      "INVALID_REQUEST",
+    );
+  }
+  if (role === "client" && !targetHostDeviceId) {
+    return fail(
+      res,
+      400,
+      "targetHostDeviceId is required for client preflight.",
+      "INVALID_REQUEST",
+    );
+  }
+
+  let tokenDoc = null;
+  try {
+    tokenDoc = await ResumeToken.findOne({ tokenId }).lean();
+  } catch (_error) {
+    return fail(
+      res,
+      503,
+      "Resume token lookup is temporarily unavailable.",
+      "UPSTREAM_UNAVAILABLE",
+    );
+  }
+
+  if (!tokenDoc) {
+    return fail(res, 404, "Resume token was not found.", "TOKEN_NOT_FOUND");
+  }
+
+  if (isTokenRevoked(tokenDoc)) {
+    return fail(res, 401, "Resume token is invalid.", "TOKEN_INVALID");
+  }
+
+  if (isTokenConsumed(tokenDoc)) {
+    return fail(res, 409, "Resume token has already been used.", "TOKEN_CONSUMED");
+  }
+
+  const expiresAt = tokenDoc.expiresAt ? new Date(tokenDoc.expiresAt) : null;
+  if (!expiresAt || Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) {
+    return fail(res, 410, "Resume token expired.", "TOKEN_EXPIRED");
+  }
+
+  const tokenRole = text(tokenDoc.role).toLowerCase();
+  const tokenRoomId = text(tokenDoc.roomId);
+  const tokenDeviceId = text(tokenDoc.deviceId);
+  const tokenTargetHostDeviceId = text(tokenDoc.targetHostDeviceId);
+
+  if (
+    tokenRole !== role ||
+    tokenRoomId !== roomId ||
+    tokenDeviceId !== deviceId ||
+    (role === "client" && tokenTargetHostDeviceId !== targetHostDeviceId)
+  ) {
+    return fail(
+      res,
+      403,
+      "Resume token does not match requested session binding.",
+      "TOKEN_BINDING_MISMATCH",
+    );
+  }
+
+  if (role === "client") {
+    try {
+      const store = getStore();
+      const hostInfo = await store.getOnlineHost(targetHostDeviceId);
+      const hostSocketAlive = Boolean(
+        hostInfo?.socketId && io.sockets.sockets.get(hostInfo.socketId),
+      );
+      if (!hostSocketAlive) {
+        const hostDoc = await Device.findOne({ deviceId: targetHostDeviceId })
+          .select("isOnline")
+          .lean();
+        const hostOnline = Boolean(hostInfo) || Boolean(hostDoc?.isOnline);
+        if (!hostOnline) {
+          return fail(
+            res,
+            423,
+            "Target host is not ready for resume.",
+            "HOST_NOT_READY",
+          );
+        }
+      }
+    } catch (_error) {
+      return fail(
+        res,
+        503,
+        "Resume preflight could not verify host availability.",
+        "UPSTREAM_UNAVAILABLE",
+      );
+    }
+  }
+
+  return res.status(200).json({
+    ok: true,
+    message: "ok",
+    reasonCode: "OK",
+  });
 });
 
 app.get("/pairings/:deviceId", async (req, res) => {
