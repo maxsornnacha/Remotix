@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const { Pairing, Device, ResumeToken, connectDb, isDbConnected } = require("./db");
@@ -16,6 +17,9 @@ const io = new Server(server, {
 
 const DEVICE_ONLINE_TTL_MS = 20000;
 const DEVICE_SWEEP_INTERVAL_MS = 5000;
+const RESUME_ROTATION_TTL_MS = Number(
+  process.env.RESUME_ROTATION_TTL_MS || 15 * 60 * 1000,
+);
 let runtimeStore = null;
 const roomHandshakeState = new Map();
 
@@ -253,10 +257,96 @@ app.post("/sessions/resume/preflight", async (req, res) => {
     }
   }
 
+  const now = new Date();
+  const nextTokenId = crypto.randomUUID();
+  const nextExpiresAt = new Date(
+    Date.now() + Math.max(30_000, RESUME_ROTATION_TTL_MS),
+  );
+  const consumeQuery = {
+    tokenId,
+    isConsumed: { $ne: true },
+    consumedAt: null,
+    isRevoked: { $ne: true },
+    revokedAt: null,
+    status: { $nin: ["consumed", "revoked"] },
+    expiresAt: { $gt: now },
+  };
+  const consumeUpdate = {
+    $set: {
+      isConsumed: true,
+      consumedAt: now,
+      status: "consumed",
+      updatedAt: now,
+    },
+  };
+
+  const session = await mongoose.startSession();
+  try {
+    let consumeResult = null;
+    await session.withTransaction(async () => {
+      consumeResult = await ResumeToken.updateOne(consumeQuery, consumeUpdate, {
+        session,
+      });
+
+      if (consumeResult?.modifiedCount !== 1) {
+        const conflictError = new Error("TOKEN_CONSUMED");
+        conflictError.reasonCode = "TOKEN_CONSUMED";
+        throw conflictError;
+      }
+
+      try {
+        await ResumeToken.create(
+          [
+            {
+              tokenId: nextTokenId,
+              role,
+              roomId,
+              deviceId,
+              targetHostDeviceId: role === "client" ? targetHostDeviceId : "",
+              expiresAt: nextExpiresAt,
+              isConsumed: false,
+              isRevoked: false,
+              status: "active",
+            },
+          ],
+          { session },
+        );
+      } catch (_rotationError) {
+        const rotationError = new Error("TOKEN_ROTATION_FAILED");
+        rotationError.reasonCode = "TOKEN_ROTATION_FAILED";
+        throw rotationError;
+      }
+    });
+  } catch (error) {
+    const reasonCode = text(error?.reasonCode || error?.message).toUpperCase();
+    if (reasonCode === "TOKEN_CONSUMED") {
+      return fail(res, 409, "Resume token has already been used.", "TOKEN_CONSUMED");
+    }
+    if (reasonCode === "TOKEN_ROTATION_FAILED") {
+      return fail(
+        res,
+        503,
+        "Resume token rotation failed. Please retry.",
+        "TOKEN_ROTATION_FAILED",
+      );
+    }
+    return fail(
+      res,
+      503,
+      "Resume token preflight is temporarily unavailable.",
+      "UPSTREAM_UNAVAILABLE",
+    );
+  } finally {
+    await session.endSession().catch(() => {});
+  }
+
   return res.status(200).json({
     ok: true,
     message: "ok",
     reasonCode: "OK",
+    consumeCurrentToken: true,
+    nextTokenId,
+    nextExpiresAt: nextExpiresAt.getTime(),
   });
 });
 
