@@ -1036,7 +1036,6 @@ export default function HostPage() {
     { key: 'stream', label: 'Stream', done: isSharing },
   ]
   const requiredHostSteps = hostConnectionSteps.filter((step) => step.key !== 'peer')
-  const pendingHostStep = requiredHostSteps.find((step) => !step.done)?.label || 'Finalizing'
   const isHostDetailReady = requiredHostSteps.every((step) => step.done)
 
   if (sessionEndedReason) {
@@ -1215,22 +1214,8 @@ export default function HostPage() {
                 <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-red-400' : 'border-slate-300 border-t-red-500'}`} />
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-red-500/30' : 'bg-red-400/40'}`} />
               </div>
-              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session</p>
-              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Current step: {pendingHostStep}</p>
-              <div className="mt-5 grid w-full max-w-sm gap-2 text-sm">
-                {hostConnectionSteps.map((step) => (
-                  <div
-                    key={step.key}
-                    className={`rounded-lg border px-3 py-2 text-left transition-all ${
-                      step.done
-                        ? (isDark ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-700')
-                        : (isDark ? 'border-slate-600 bg-slate-800/60 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-600')
-                    }`}
-                  >
-                    {step.done ? 'Done' : 'Waiting'} - {step.label}
-                  </div>
-                ))}
-              </div>
+              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>กำลังเข้าถึงอีกเครื่อง...</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>กำลังเตรียมการเชื่อมต่ออัตโนมัติ โปรดรอสักครู่</p>
             </div>
           )}
         </div>

@@ -82,6 +82,11 @@ export default function ClientPage() {
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const canControlSession = Boolean(approvedRoomId)
+  const isWaitingForHostApproval =
+    !canControlSession &&
+    preapproved !== '1' &&
+    !sessionEndedReason &&
+    !dbUnavailableMessage
   const controlSensitivityMap = {
     slow: 0.7,
     normal: 1,
@@ -895,13 +900,23 @@ export default function ClientPage() {
     router.push('/home')
   }
 
+  const handleCancelPendingRequest = () => {
+    const pendingRoomId = toText(roomId)
+    if (pendingRoomId) {
+      socket.emit('leave-session', {
+        roomId: pendingRoomId,
+        message: 'Client cancelled connection request.',
+      })
+    }
+    router.push('/home')
+  }
+
   const clientConnectionSteps = [
     { key: 'signaling', label: 'Signaling', done: isSignalingActive },
     { key: 'peer', label: 'Peer', done: isPeerConnected || hasRemoteStream },
     { key: 'stream', label: 'Stream', done: hasRemoteStream },
   ]
   const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'stream')
-  const pendingClientStep = requiredClientSteps.find((step) => !step.done)?.label || 'Finalizing'
   const isClientDetailReady = requiredClientSteps.every((step) => step.done)
 
   useEffect(() => {
@@ -925,6 +940,32 @@ export default function ClientPage() {
           >
             Back to Home
           </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (isWaitingForHostApproval) {
+    return (
+      <div className={`min-h-screen relative overflow-hidden ${isDark ? 'bg-[#1b1730] text-white' : 'bg-slate-100 text-slate-900'}`}>
+        <div className={`pointer-events-none absolute inset-0 ${isDark ? 'bg-[radial-gradient(circle_at_center,rgba(120,100,220,0.20),rgba(20,20,35,0.95))]' : 'bg-[radial-gradient(circle_at_center,rgba(99,102,241,0.18),rgba(241,245,249,0.92))]'}`} />
+        <div className="relative z-10 min-h-screen flex items-center justify-center p-6">
+          <div className={`w-full max-w-md rounded-2xl border shadow-2xl px-6 py-5 ${isDark ? 'border-slate-600 bg-[#2b2f3a]/95' : 'border-slate-300 bg-white/95'}`}>
+            <h2 className={`text-2xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>Connecting...</h2>
+            <p className={`mt-3 text-base leading-relaxed ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+              Please wait for the remote side to accept your session request.
+            </p>
+            <div className="mt-5 flex items-center justify-between">
+              <span className={`inline-flex h-5 w-5 rounded-full border-2 border-current border-t-transparent animate-spin ${isDark ? 'text-blue-300' : 'text-blue-600'}`} aria-hidden="true" />
+              <button
+                type="button"
+                onClick={handleCancelPendingRequest}
+                className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     )
@@ -1069,22 +1110,8 @@ export default function ClientPage() {
                 <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-blue-400' : 'border-slate-300 border-t-blue-500'}`} />
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-blue-500/30' : 'bg-blue-400/40'}`} />
               </div>
-              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Preparing remote session</p>
-              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Current step: {pendingClientStep}</p>
-              <div className="mt-5 grid w-full max-w-sm gap-2 text-sm">
-                {clientConnectionSteps.map((step) => (
-                  <div
-                    key={step.key}
-                    className={`rounded-lg border px-3 py-2 text-left transition-all ${
-                      step.done
-                        ? (isDark ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-700')
-                        : (isDark ? 'border-slate-600 bg-slate-800/60 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-600')
-                    }`}
-                  >
-                    {step.done ? 'Done' : 'Waiting'} - {step.label}
-                  </div>
-                ))}
-              </div>
+              <p className={`mt-5 text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>กำลังเข้าถึงอีกเครื่อง...</p>
+              <p className={`mt-2 text-sm ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>กำลังเตรียมการเชื่อมต่ออัตโนมัติ โปรดรอสักครู่</p>
             </div>
           )}
         </div>
