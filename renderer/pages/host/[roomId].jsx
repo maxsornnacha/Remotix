@@ -1099,10 +1099,8 @@ export default function HostPage() {
       })
     }
     window.addEventListener('beforeunload', leaveCurrentSession)
-    window.addEventListener('pagehide', leaveCurrentSession)
     return () => {
       window.removeEventListener('beforeunload', leaveCurrentSession)
-      window.removeEventListener('pagehide', leaveCurrentSession)
     }
   }, [roomId])
 

@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 const THEME_STORAGE_KEY = 'remotix-theme'
 
 export const useTheme = () => {
-  const [theme, setTheme] = useState('light')
+  const [theme, setTheme] = useState('dark')
 
   useEffect(() => {
     if (typeof window === 'undefined') return

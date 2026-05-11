@@ -3,6 +3,7 @@ import React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertContext } from "../libs/alerts";
 import { api } from "../libs/http";
+import { useTheme } from "../libs/theme";
 
 class AppErrorBoundary extends React.Component {
   constructor(props) {
@@ -62,34 +63,40 @@ class AppErrorBoundary extends React.Component {
   }
 }
 
-function ServiceUnavailablePage({ title, message, onRetry, isChecking }) {
+function ServiceUnavailablePage({ title, message, onRetry, isChecking, isDark }) {
   return (
-    <div className="min-h-screen bg-[#0b1020] text-slate-100">
-      <div className="h-11 border-b border-slate-700/80 bg-[#0f172a] px-4 flex items-center justify-between">
+    <div className={`min-h-screen ${isDark ? "bg-[#0b1020] text-slate-100" : "bg-slate-100 text-slate-900"}`}>
+      <div className={`h-11 px-4 flex items-center justify-between border-b ${
+        isDark ? "border-slate-700/80 bg-[#0f172a]" : "border-slate-200 bg-white"
+      }`}>
         <div className="flex items-center gap-2">
-          <h2 className="ml-2 text-lg font-medium tracking-wide text-slate-300">
+          <h2 className={`ml-2 text-lg font-medium tracking-wide ${isDark ? "text-slate-300" : "text-slate-700"}`}>
             Remotix Desktop
           </h2>
         </div>
-        <span className="text-[11px] px-2 py-0.5 rounded border border-red-400/40 bg-red-500/10 text-red-200">
+        <span className={`text-[11px] px-2 py-0.5 rounded border ${
+          isDark ? "border-red-400/40 bg-red-500/10 text-red-200" : "border-red-300 bg-red-50 text-red-700"
+        }`}>
           SERVICE BLOCKED
         </span>
       </div>
 
       <div className="grid grid-rows-[auto_1fr] min-h-[calc(100vh-44px)]">
         <section className="p-6 md:p-8">
-          <p className="text-xs uppercase tracking-widest text-slate-400">
+          <p className={`text-xs uppercase tracking-widest ${isDark ? "text-slate-400" : "text-slate-500"}`}>
             Remotix Service Guard
           </p>
-          <h1 className="mt-2 text-2xl md:text-3xl font-bold text-red-300">
+          <h1 className={`mt-2 text-2xl md:text-3xl font-bold ${isDark ? "text-red-300" : "text-red-700"}`}>
             {title}
           </h1>
-          <p className="mt-3 text-sm md:text-base text-slate-300 max-w-2xl">
+          <p className={`mt-3 text-sm md:text-base max-w-2xl ${isDark ? "text-slate-300" : "text-slate-700"}`}>
             {message}
           </p>
 
-          <div className="mt-7 rounded-xl border border-slate-700 bg-[#0b1324] p-4">
-            <p className="text-xs text-slate-400 mb-3">Recovery Actions</p>
+          <div className={`mt-7 rounded-xl border p-4 ${
+            isDark ? "border-slate-700 bg-[#0b1324]" : "border-slate-300 bg-white"
+          }`}>
+            <p className={`text-xs mb-3 ${isDark ? "text-slate-400" : "text-slate-500"}`}>Recovery Actions</p>
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
@@ -98,7 +105,7 @@ function ServiceUnavailablePage({ title, message, onRetry, isChecking }) {
                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed">
                 {isChecking ? "Checking..." : "Retry Connection"}
               </button>
-              <span className="text-xs text-slate-400">
+              <span className={`text-xs ${isDark ? "text-slate-400" : "text-slate-500"}`}>
                 Check server and database connection, then retry.
               </span>
             </div>
@@ -110,6 +117,7 @@ function ServiceUnavailablePage({ title, message, onRetry, isChecking }) {
 }
 
 function ServiceGuard({ children }) {
+  const { isDark } = useTheme();
   const [isChecking, setIsChecking] = useState(true);
   const [hasCheckedOnce, setHasCheckedOnce] = useState(false);
   const [isUnavailable, setIsUnavailable] = useState(false);
@@ -186,8 +194,15 @@ function ServiceGuard({ children }) {
   const content = useMemo(() => {
     if (!hasCheckedOnce && isChecking && !isUnavailable) {
       return (
-        <div className="min-h-screen bg-slate-950 text-slate-200 flex items-center justify-center">
-          <p className="text-sm">Checking service status...</p>
+        <div className={`min-h-screen flex items-center justify-center px-6 ${isDark ? "bg-slate-950 text-slate-200" : "bg-slate-100 text-slate-800"}`}>
+          <div className={`w-full max-w-sm rounded-2xl border p-6 text-center shadow-2xl ${isDark ? "border-slate-800 bg-slate-900/70" : "border-slate-300 bg-white"}`}>
+            <div className="mx-auto mb-4 relative h-14 w-14">
+              <span className={`absolute inset-0 rounded-full animate-ping ${isDark ? "bg-cyan-400/20" : "bg-cyan-500/20"}`} />
+              <span className={`absolute inset-1 rounded-full border-4 border-t-cyan-400 animate-spin ${isDark ? "border-slate-600" : "border-slate-300"}`} />
+            </div>
+            <p className={`text-sm font-medium ${isDark ? "text-slate-100" : "text-slate-900"}`}>Checking service status...</p>
+            <p className={`mt-1 text-xs ${isDark ? "text-slate-400" : "text-slate-500"}`}>Preparing secure remote session.</p>
+          </div>
         </div>
       );
     }
@@ -197,6 +212,7 @@ function ServiceGuard({ children }) {
           title={reason.title}
           message={reason.message}
           isChecking={isChecking}
+          isDark={isDark}
           onRetry={() => checkServiceHealth({ foreground: true })}
         />
       );

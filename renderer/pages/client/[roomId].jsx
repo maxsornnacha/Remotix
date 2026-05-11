@@ -808,10 +808,8 @@ export default function ClientPage() {
       })
     }
     window.addEventListener('beforeunload', leaveCurrentSession)
-    window.addEventListener('pagehide', leaveCurrentSession)
     return () => {
       window.removeEventListener('beforeunload', leaveCurrentSession)
-      window.removeEventListener('pagehide', leaveCurrentSession)
     }
   }, [approvedRoomId, roomId])
   
