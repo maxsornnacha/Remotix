@@ -3,7 +3,6 @@ import { useRouter } from 'next/router'
 import Peer from 'simple-peer'
 import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
-import { useAlerts } from '../../libs/alerts'
 import { attachRtcDiagnostics, getRtcConfig } from '../../libs/rtc'
 import { api } from '../../libs/http'
 import {
@@ -168,7 +167,6 @@ export default function HostPage() {
   const blackFrameHitsRef = useRef(0)
   const streamDebugIntervalRef = useRef(null)
   const blackRecoveryInFlightRef = useRef(false)
-  const lastNotifiedMessageRef = useRef('')
   const isManualDisconnectRef = useRef(false)
   const appliedQualityLevelRef = useRef('')
   const approvalPolicyRef = useRef(HOST_APPROVAL_POLICY.ALWAYS_ASK)
@@ -178,7 +176,6 @@ export default function HostPage() {
   const lastPhaseToastRef = useRef('')
   const lastQualityApplyAtRef = useRef(0)
   const { isDark, toggleTheme } = useTheme()
-  const { pushAlert } = useAlerts()
   const logDebug = (stage, payload = {}) => {
     console.log(`[host][debug] ${stage}`, payload)
   }
@@ -233,13 +230,8 @@ export default function HostPage() {
             phase === SESSION_PHASE.ENDED)
         ) {
           lastPhaseToastRef.current = phase
-          const toastType =
-            phase === SESSION_PHASE.LIVE
-              ? 'success'
-              : phase === SESSION_PHASE.ENDED
-                ? 'error'
-                : 'info'
-          pushAlert(getSessionPhaseMessage(phase, 'host'), { type: toastType })
+          const phaseMessage = getSessionPhaseMessage(phase, 'host')
+          console.log('[host][phase]', { phase, message: phaseMessage })
         }
       },
       onTelemetry: (entry) => {
@@ -338,30 +330,18 @@ export default function HostPage() {
   }
 
 
-  const shouldPushHostNotification = (text, type) => {
-    if (!text) return false
-    if (type === 'error') return true
-    return (
-      text.includes('Incoming request') ||
-      text.includes('Connection approved') ||
-      text.includes('Connection rejected') ||
-      text.includes('Remote session ended')
-    )
-  }
-
   const setNotice = (message, type = 'info') => {
     const text = toText(message)
     setSessionNotice(text)
-    if (!shouldPushHostNotification(text, type)) return
-    if (lastNotifiedMessageRef.current === text) return
-    lastNotifiedMessageRef.current = text
-    pushAlert(text, { type })
+    if (text) {
+      console.log('[host][notice]', { type, message: text })
+    }
   }
 
   const setDbMessage = (message) => {
     const text = toText(message)
     setDbUnavailableMessage(text)
-    if (text) pushAlert(text, { type: 'error' })
+    if (text) console.warn('[host][db]', text)
   }
 
   const appendHostAuditEvent = (eventName, payload = {}) => {
@@ -1545,11 +1525,10 @@ export default function HostPage() {
   return (
     <div className={`min-h-screen relative overflow-hidden ${isDark ? 'bg-[#111318] text-white' : 'bg-slate-100 text-slate-900'}`}>
       <div className={`pointer-events-none absolute -top-16 right-0 h-64 w-64 rounded-full blur-3xl ${isDark ? 'bg-red-500/10' : 'bg-red-300/30'}`} />
-      <div className={`relative z-10 w-full h-screen overflow-hidden grid grid-rows-[auto_minmax(0,1fr)_auto] ${isDark ? 'bg-[#171a22]' : 'bg-white'}`}>
-        <div className={`px-5 py-3 border-b flex items-center justify-between ${isDark ? 'border-slate-700 bg-[#1c2029]' : 'border-slate-200 bg-slate-50'}`}>
+      <div className={`relative z-10 w-full h-screen overflow-hidden grid grid-rows-[auto_minmax(0,1fr)] ${isDark ? 'bg-[#171a22]' : 'bg-white'}`}>
+        <div className={`px-4 py-2 border-b flex items-center justify-between ${isDark ? 'border-slate-700 bg-[#1c2029]' : 'border-slate-200 bg-slate-50'}`}>
           <div>
-            <h1 className={`text-xl font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Remote Session</h1>
-            <p className={`text-[11px] font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Desk ID: {toText(roomId)}</p>
+            <h1 className={`text-lg font-semibold tracking-tight ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Remote Session</h1>
           </div>
           <div className="flex items-center gap-2 text-xs">
             <button
@@ -1579,17 +1558,17 @@ export default function HostPage() {
           </div>
         ) : null}
 
-        <div className="min-h-0 overflow-hidden p-5">
+        <div className="min-h-0 overflow-hidden p-0">
           {isHostDetailReady ? (
-            <div className="h-full grid lg:grid-cols-[minmax(0,1fr)_340px] gap-4">
-            <section className={`rounded-xl border overflow-hidden flex flex-col ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-white'}`}>
-              <div className={`px-4 py-2.5 text-xs border-b flex items-center justify-between ${isDark ? 'border-slate-700 text-slate-300 bg-[#202531]' : 'border-slate-200 text-slate-600 bg-slate-50'}`}>
+            <div className="h-full grid lg:grid-cols-[minmax(0,1fr)_260px] xl:grid-cols-[minmax(0,1fr)_280px] gap-0">
+            <section className={`overflow-hidden flex flex-col ${isDark ? 'bg-[#171b24]' : 'bg-white'}`}>
+              <div className={`px-3 py-2 text-xs flex items-center justify-between ${isDark ? 'text-slate-300 bg-[#202531]' : 'text-slate-600 bg-slate-50'}`}>
                 <span>Remote Desk Preview</span>
                 <span className="font-mono">{toText(selectedSourceId) || 'auto-source'}</span>
               </div>
-              <div className="flex-1 p-3">
+              <div className="flex-1 p-0">
                 {isSharing ? (
-                  <div className="h-full bg-black border border-gray-700 rounded-lg overflow-hidden">
+                  <div className="h-full bg-black overflow-hidden">
                     <video
                       ref={videoRef}
                       autoPlay
@@ -1599,19 +1578,17 @@ export default function HostPage() {
                     />
                   </div>
                 ) : (
-                  <div className={`h-full rounded-lg border min-h-[260px] md:min-h-[320px] flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#0f172a]' : 'border-slate-300 bg-slate-50'}`}>
-                    <WifiSignalIcon isDark={isDark} />
-                    <p className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>Waiting for remote request</p>
-                    <p className={`text-sm mt-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                      Preview starts as soon as session share is ready.
-                    </p>
+                  <div className="h-full min-h-[260px] md:min-h-[320px] flex items-center justify-center bg-black">
+                    <div className={`h-12 w-12 rounded-full border-4 border-t-transparent animate-spin ${
+                      isDark ? 'border-slate-500' : 'border-slate-300'
+                    }`} />
                   </div>
                 )}
               </div>
             </section>
 
-            <aside className={`rounded-xl border p-3 overflow-y-auto space-y-3 ${isDark ? 'border-slate-700 bg-[#171b24]' : 'border-slate-300 bg-slate-50'}`}>
-              <div className={`rounded-lg border p-3 ${isDark ? 'border-slate-600 bg-[#202531]' : 'border-slate-300 bg-white'}`}>
+            <aside className={`p-2 overflow-y-auto space-y-2 ${isDark ? 'bg-[#171b24]' : 'bg-slate-50'}`}>
+              <div className={`rounded-lg border p-2.5 ${isDark ? 'border-slate-600 bg-[#202531]' : 'border-slate-300 bg-white'}`}>
                 <p className={`text-xs uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Session Controls</p>
                 <div className="mt-2">
                   <label className={`text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
@@ -1670,7 +1647,9 @@ export default function HostPage() {
                       setNotice(next ? 'Remote control is enabled.' : 'Remote control is disabled.')
                     }}
                     disabled={permissionGate.checking || !permissionGate.allGranted}
-                    className={`col-span-2 px-3 py-2 rounded-md text-sm transition ${allowControl ? 'bg-red-700 hover:bg-red-600' : 'bg-red-600 hover:bg-red-500'}`}
+                    className={`col-span-2 px-3 py-2 rounded-md text-sm text-white transition ${
+                      allowControl ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-cyan-600 hover:bg-cyan-500'
+                    }`}
                   >
                     {allowControl ? 'Control On' : 'Enable Ctrl'}
                   </button>
@@ -1683,13 +1662,13 @@ export default function HostPage() {
                 </div>
               </div>
 
-              <div className={`rounded-lg border p-3 text-sm ${isDark ? 'border-slate-600 bg-[#202531] text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}>
+              <div className={`rounded-lg border p-2.5 text-sm ${isDark ? 'border-slate-600 bg-[#202531] text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}>
                 <p>Control permission: <span className="font-semibold">{allowControl ? 'Allowed' : 'Blocked'}</span></p>
                 <p className={`mt-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Shortcut: press C to toggle control</p>
               </div>
 
               {showDiagnostics ? (
-                <div className={`rounded-lg border p-3 text-xs ${isDark ? 'border-slate-600 bg-[#202531] text-slate-300' : 'border-slate-300 bg-white text-slate-700'}`}>
+                <div className={`rounded-lg border p-2.5 text-xs ${isDark ? 'border-slate-600 bg-[#202531] text-slate-300' : 'border-slate-300 bg-white text-slate-700'}`}>
                   <p>Phase: {sessionPhase}</p>
                   <p>Signaling: {isSignalingActive ? 'connected' : 'waiting'}</p>
                   <p>Peer: {isPeerConnected ? 'connected' : 'waiting'}</p>
@@ -1795,7 +1774,7 @@ export default function HostPage() {
             </aside>
             </div>
           ) : (
-            <div className={`h-full rounded-2xl border backdrop-blur-sm flex flex-col items-center justify-center text-center px-6 ${isDark ? 'border-slate-700 bg-[#171b24]/90' : 'border-slate-200 bg-white/95'}`}>
+            <div className={`h-full backdrop-blur-sm flex flex-col items-center justify-center text-center px-6 ${isDark ? 'bg-[#171b24]/90' : 'bg-white/95'}`}>
               <div className="relative">
                 <div className={`h-16 w-16 rounded-full border-4 animate-spin ${isDark ? 'border-slate-600 border-t-red-400' : 'border-slate-300 border-t-red-500'}`} />
                 <div className={`absolute inset-0 m-auto h-7 w-7 rounded-full animate-pulse ${isDark ? 'bg-red-500/30' : 'bg-red-400/40'}`} />
@@ -1806,20 +1785,6 @@ export default function HostPage() {
           )}
         </div>
 
-        <div className={`px-5 pb-4 pt-2 border-t space-y-1.5 ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
-          {isHostDetailReady ? (
-            <p className={`text-center text-sm transition-colors ${isDark ? 'text-gray-400' : 'text-slate-600'}`}>
-              {isSharing ? 'You are sharing your screen with approved clients.' : 'No active screen sharing until you approve a request.'}
-            </p>
-          ) : (
-            <p className={`text-center text-sm animate-pulse ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-              {sessionPhaseLabel}
-            </p>
-          )}
-          <p className={`text-center text-sm ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
-            {effectiveHostNotice || 'Keep remote control off until you verify the client identity.'}
-          </p>
-        </div>
       </div>
       {isSourcePickerOpen ? (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 p-4">

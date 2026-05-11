@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from 'react'
 import { getSocket } from '../libs/socket'
 import { useTheme } from '../libs/theme'
 import { getOrCreateDeviceProfile, regenerateDeviceProfile, saveDeviceProfile } from '../libs/device'
-import { useAlerts } from '../libs/alerts'
 import { api } from '../libs/http'
 import { createSessionEngine, SESSION_PHASE } from '../libs/session-engine'
 import {
@@ -89,6 +88,12 @@ export default function HomePage() {
   const [roomId, setRoomId] = useState('')
   const [isCheckingRoom, setIsCheckingRoom] = useState(false)
   const [feedback, setFeedback] = useState('')
+  const [feedbackModal, setFeedbackModal] = useState({
+    open: false,
+    message: '',
+    detail: '',
+    type: 'info',
+  })
   const [addressCopiedFlash, setAddressCopiedFlash] = useState(false)
   const [hasAcceptedPolicy, setHasAcceptedPolicy] = useState(false)
   const [deviceId, setDeviceId] = useState('')
@@ -117,7 +122,7 @@ export default function HomePage() {
   const outboundRequestTimeoutRef = useRef(null)
   const sessionEngineRef = useRef(null)
   const pendingOutboundAddressRef = useRef('')
-  const lastNotifiedMessageRef = useRef('')
+  const hasConnectionApprovedRef = useRef(false)
   const resumeExpiryWarnedRef = useRef(false)
   const resumeHintTimeoutRef = useRef(null)
   const hadResumeTokenRef = useRef(false)
@@ -125,7 +130,6 @@ export default function HomePage() {
   const addressCopyFlashTimeoutRef = useRef(null)
   const router = useRouter()
   const { isDark, toggleTheme } = useTheme()
-  const { pushAlert } = useAlerts()
   const resumeTone = getResumeTone(resumeRemainingMs)
   const resumeToneLabel = resumeTone === 'critical'
     ? 'Rejoin expiring soon'
@@ -146,32 +150,22 @@ export default function HomePage() {
     }
   }, [])
 
-  const shouldPushHomeNotification = (text, type) => {
-    if (!text) return false
-    if (type === 'error') return true
-    const lower = text.toLowerCase()
-    return (
-      lower.includes('opening session') ||
-      lower.includes('incoming request') ||
-      lower.includes('copied') ||
-      lower.includes('clipboard')
-    )
-  }
-
-  const notify = (message, type = 'info') => {
-    const text = toText(message)
+  const openFeedbackModal = (message, type = 'info', detail = '') => {
+    const text = toText(message).trim()
     if (!text) return
-    if (!shouldPushHomeNotification(text, type)) return
-    if (lastNotifiedMessageRef.current === text) return
-    lastNotifiedMessageRef.current = text
-    pushAlert(text, { type })
+    setFeedbackModal({
+      open: true,
+      message: text,
+      detail: toText(detail).trim(),
+      type: type === 'error' ? 'error' : type === 'success' ? 'success' : 'info',
+    })
   }
 
   const setFeedbackWithAlert = (message, type = 'info', options = {}) => {
     const text = toText(message)
     setFeedback(text)
     if (!options.silent) {
-      notify(text, type)
+      openFeedbackModal(text, type)
     }
   }
 
@@ -290,8 +284,8 @@ export default function HomePage() {
     if (resumeRemainingMs <= 0) return
     if (resumeExpiryWarnedRef.current) return
     resumeExpiryWarnedRef.current = true
-    pushAlert('Rejoin session will expire in less than 1 minute.', { type: 'error' })
-  }, [resumeToken, resumeRemainingMs, pushAlert])
+    console.warn('[home][resume] token expires in less than 1 minute')
+  }, [resumeToken, resumeRemainingMs])
 
   useEffect(() => {
     checkPermissions()
@@ -415,6 +409,7 @@ export default function HomePage() {
     }
 
     const onHostConnectionApproved = (payload) => {
+      hasConnectionApprovedRef.current = true
       const roomIdForHost = toText(payload?.roomId)
       const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
       const safeDeviceId = toText(deviceId) || fallbackDeviceId
@@ -424,6 +419,7 @@ export default function HomePage() {
     }
 
     const onConnectionApproved = (payload) => {
+      hasConnectionApprovedRef.current = true
       const approvedRoomId = toText(payload?.roomId)
       const hostDeviceId = toText(payload?.hostDeviceId) || toText(pendingOutboundAddressRef.current)
       const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
@@ -436,7 +432,10 @@ export default function HomePage() {
 
     const onConnectionRejected = (payload) => {
       resetOutboundRequestState()
-      setFeedbackWithAlert(payload?.message || 'Connection request was rejected by host.', 'error')
+      handleConnectionFailure(
+        payload?.message || 'Connection request was rejected by host.',
+        'The remote host denied the request.',
+      )
     }
 
     socket.on('incoming-connection-request', onIncomingRequest)
@@ -474,6 +473,24 @@ export default function HomePage() {
     setFeedbackWithAlert('Policy accepted. You can continue the connection flow.', 'success')
   }
 
+  const openConnectionErrorPage = (message, detail = '') => {
+    const safeMessage = toText(message).trim() || 'Connection failed.'
+    const safeDetail = toText(detail).trim()
+    const query = new URLSearchParams({
+      message: safeMessage,
+      ...(safeDetail ? { detail: safeDetail } : {}),
+    })
+    router.push(`/connection-error?${query.toString()}`)
+  }
+
+  const handleConnectionFailure = (message, detail = '') => {
+    if (hasConnectionApprovedRef.current) {
+      openConnectionErrorPage(message, detail)
+      return
+    }
+    openFeedbackModal(message, 'error', detail)
+  }
+
   const requestConnectionToAddress = (targetAddress) => {
     if (!permissionGate.allGranted) {
       setFeedbackWithAlert('Required permissions are not granted yet.', 'error')
@@ -488,33 +505,43 @@ export default function HomePage() {
     }
     if (targetHostDeviceId === deviceId) {
       setFeedback('')
-      notify('You cannot connect to your own address.', 'error')
+      setFeedbackWithAlert('You cannot connect to your own address.', 'error')
       return
     }
 
     setIsCheckingRoom(true)
     setPendingOutboundAddress(targetHostDeviceId)
+    hasConnectionApprovedRef.current = false
     sessionEngineRef.current?.setPhase(SESSION_PHASE.REQUESTING)
-    setFeedbackWithAlert('Checking address in database...', 'info', { silent: true })
+    console.log('[home][connect] checking device status', { targetHostDeviceId })
 
     api.get(`/devices/${encodeURIComponent(targetHostDeviceId)}/status`)
       .then(({ data }) => {
         if (!data?.exists) {
           resetOutboundRequestState()
-          setFeedbackWithAlert('Address not found in system.', 'error')
+          handleConnectionFailure(
+            'Address not found in system.',
+            `No device is registered with address ${targetHostDeviceId}.`,
+          )
           return
         }
         if (!data?.isOnline) {
           resetOutboundRequestState()
-          setFeedbackWithAlert('Address is currently offline.', 'error')
+          handleConnectionFailure(
+            'Address is currently offline.',
+            `Device ${targetHostDeviceId} is not online right now.`,
+          )
           return
         }
 
-        setFeedbackWithAlert('Sending connection request. Waiting for host approval...')
+        console.log('[home][connect] sending request', { targetHostDeviceId })
         clearOutboundRequestTimeout()
         outboundRequestTimeoutRef.current = sessionEngineRef.current?.setTimeoutTask('outbound-request-timeout', 15000, () => {
           resetOutboundRequestState()
-          setFeedbackWithAlert('Request timed out. Host did not respond in time.', 'error')
+          handleConnectionFailure(
+            'Request timed out.',
+            'Host did not respond in time. Please try again.',
+          )
         })
         socket.emit('request-connection', {
           targetHostDeviceId,
@@ -527,14 +554,20 @@ export default function HomePage() {
           const fallbackMessage = targetHostDeviceId
             ? 'Address not found in system.'
             : 'Could not send connection request.'
-          setFeedbackWithAlert(response?.message || fallbackMessage, 'error')
+          handleConnectionFailure(
+            response?.message || fallbackMessage,
+            'The request could not be sent to the remote host.',
+          )
         })
       })
       .catch((error) => {
         sessionEngineRef.current?.setPhase(SESSION_PHASE.ENDED)
         resetOutboundRequestState()
         const message = error?.response?.data?.message || 'Could not verify address in database.'
-        setFeedbackWithAlert(message, 'error')
+        handleConnectionFailure(
+          message,
+          'Failed while verifying remote address status.',
+        )
       })
   }
 
@@ -735,9 +768,9 @@ export default function HomePage() {
       setIsRespondingRequest(false)
     })
     if (!approved) {
-      setFeedbackWithAlert('Connection request rejected.', 'error')
+      console.log('[home][incoming-request] rejected by host')
     } else {
-      setFeedbackWithAlert('Connection approved. Opening session...', 'success')
+      console.log('[home][incoming-request] approved, opening host room')
     }
     setIncomingRequest((current) => {
       if (!current?.clientSocketId) return null
@@ -749,7 +782,6 @@ export default function HomePage() {
     if (!deviceId || typeof navigator === 'undefined') return
     try {
       await navigator.clipboard.writeText(deviceId)
-      lastNotifiedMessageRef.current = ''
       setFeedbackWithAlert('Address copied to clipboard.', 'success')
       setAddressCopiedFlash(true)
       if (addressCopyFlashTimeoutRef.current) {
@@ -823,7 +855,7 @@ export default function HomePage() {
                 type="text"
                 value={roomId}
                 onChange={(e) => setRoomId(toText(e.target.value))}
-                placeholder="Remote address"
+                placeholder="Enter Remote address"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') joinRoom()
                 }}
@@ -845,38 +877,6 @@ export default function HomePage() {
                   'Connect'
                 )}
               </button>
-              {resumeToken || showResumeExpiredHint ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={resumeToken ? rejoinLastSession : createNewSession}
-                    disabled={isCheckingRoom || isServiceLocked || isValidatingResume}
-                    title={
-                      resumeToken
-                        ? `Rejoin last session. Expires in ${formatRemainingTime(resumeRemainingMs)}. Preflight: ${RESUME_PREFLIGHT_MODE}${
-                            lastResumeBypassReason ? `. ${lastResumeBypassReason}` : ''
-                          }`
-                        : 'Start a new session token'
-                    }
-                    className={`shrink-0 rounded-md px-2 py-1.5 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
-                      resumeToken
-                        ? 'bg-indigo-600 text-white hover:bg-indigo-500'
-                        : 'bg-slate-600 text-white hover:bg-slate-500'
-                    }`}
-                  >
-                    {resumeToken ? (isValidatingResume ? '…' : 'Rejoin') : 'New'}
-                  </button>
-                  {resumeToken ? (
-                    <span
-                      className={`hidden sm:inline text-[10px] tabular-nums opacity-80 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}
-                      title={`${resumeToneLabel} · ${RESUME_PREFLIGHT_MODE}`}
-                    >
-                      {formatRemainingTime(resumeRemainingMs)}
-                    </span>
-                  ) : null}
-                </>
-              ) : null}
-
               <span
                 className={`hidden md:block h-5 w-px shrink-0 ${isDark ? 'bg-slate-600' : 'bg-slate-300'}`}
                 aria-hidden="true"
@@ -1009,7 +1009,7 @@ export default function HomePage() {
               ))}
             </div>
 
-            <div className={`rounded-2xl border p-4 ${isDark ? 'border-slate-700 bg-[#18233b]' : 'border-slate-200 bg-slate-50'}`}>
+            <div className={`rounded-2xl`}>
               <h3 className={`text-sm font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>Trusted Devices</h3>
               <p className={`mt-1 mb-3 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                 Devices you have connected to before. Use Connect to request again without typing the address.
@@ -1019,33 +1019,59 @@ export default function HomePage() {
               ) : pairings.length === 0 ? (
                 <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>No paired devices yet. Complete a session once to save a pairing here.</p>
               ) : (
-                <div className="space-y-2">
-                  {pairings.map((item) => (
-                    <div
-                      key={`${item.ownerDeviceId}-${item.peerDeviceId}`}
-                      className={`rounded-md border px-3 py-2 flex items-center justify-between ${isDark ? 'border-slate-600 bg-[#0f172a]' : 'border-slate-300 bg-white'}`}
-                    >
-                      <div>
-                        <p className="text-sm">{toText(item.peerLabel) || toText(item.peerDeviceId)}</p>
-                        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{toText(item.peerDeviceId)}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => connectToPairedDevice(item.peerDeviceId)}
-                        disabled={isServiceLocked || isCheckingRoom}
-                        className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  {pairings.map((item) => {
+                    const peerId = toText(item.peerDeviceId).trim()
+                    const isRequesting = isCheckingRoom && pendingOutboundAddress === peerId
+                    return (
+                      <div
+                        key={`${item.ownerDeviceId}-${item.peerDeviceId}`}
+                        className="group relative overflow-hidden rounded-2xl border-2 border-blue-500/90 bg-[#0b1020] p-3 shadow-[0_8px_22px_rgba(0,0,0,0.34)]"
                       >
-                        {isCheckingRoom && pendingOutboundAddress === toText(item.peerDeviceId).trim() ? (
-                          <>
-                            <CircleLoader className="h-3.5 w-3.5" />
-                            Requesting...
-                          </>
-                        ) : (
-                          'Connect'
-                        )}
-                      </button>
-                    </div>
-                  ))}
+                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-[#0c1018] via-[#101625] to-[#21091a]" />
+                        <div className="pointer-events-none absolute -left-20 top-24 h-44 w-80 rotate-[-33deg] rounded-[50%] border border-[#d6d8ff]/60 bg-gradient-to-r from-[#9ea8ff]/55 via-[#bda6ff]/30 to-transparent blur-[0.2px]" />
+                        <div className="pointer-events-none absolute left-20 top-[-52px] h-52 w-[24rem] rotate-[-16deg] rounded-[50%] border border-[#f0d0ff]/50 bg-gradient-to-r from-[#a14cc8]/65 via-[#b22082]/55 to-[#e64f88]/70" />
+                        <div className="pointer-events-none absolute left-20 top-24 h-52 w-[24rem] rotate-[-8deg] rounded-[50%] border border-[#ffd4ef]/35 bg-gradient-to-r from-[#0a0420]/80 via-[#2f0d45]/85 to-[#6b0f3f]/80" />
+
+                        <div className="relative z-10 flex min-h-[180px] flex-col justify-between">
+                          <div>
+                            <div className="mb-2">
+                              <span className="inline-flex rounded-lg bg-slate-900/75 px-2 py-1 text-[11px] font-semibold text-slate-200">
+                                Remote Connection
+                              </span>
+                            </div>
+                          </div>
+
+                          <div>
+                            <p className="max-w-full break-all text-[1.02rem] font-semibold leading-tight tracking-tight text-white sm:text-[1.12rem]">
+                              {peerId || '-'}
+                            </p>
+                            <p className="mt-1 truncate text-xl font-semibold text-slate-100">
+                              {toText(item.peerLabel) || 'Unknown device'}
+                            </p>
+                          </div>
+
+                          <div className="mt-3.5">
+                            <button
+                              type="button"
+                              onClick={() => connectToPairedDevice(item.peerDeviceId)}
+                              disabled={isServiceLocked || isCheckingRoom}
+                              className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1 text-[10px] font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {isRequesting ? (
+                                <>
+                                  <CircleLoader className="h-3.5 w-3.5" />
+                                  Requesting...
+                                </>
+                              ) : (
+                                'Connect'
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -1053,6 +1079,56 @@ export default function HomePage() {
 
         </main>
       </div>
+
+      {feedbackModal.open ? (
+        <div
+          className="absolute inset-0 z-[34] flex items-center justify-center bg-black/55 p-4 animate-[modalBackdropIn_220ms_ease-out]"
+          onClick={() => setFeedbackModal((current) => ({ ...current, open: false }))}
+          role="presentation"
+        >
+          <div
+            className={`w-full max-w-md rounded-xl border p-5 shadow-2xl animate-[modalPanelIn_260ms_cubic-bezier(0.2,0.8,0.2,1)] ${
+              isDark ? 'border-slate-600 bg-[#101a2f]' : 'border-slate-300 bg-white'
+            }`}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="home-feedback-title"
+          >
+            <h3
+              id="home-feedback-title"
+              className={`text-base font-semibold ${
+                feedbackModal.type === 'success'
+                    ? (isDark ? 'text-emerald-200' : 'text-emerald-700')
+                    : (isDark ? 'text-slate-100' : 'text-slate-900')
+              }`}
+            >
+              {feedbackModal.type === 'success'
+                  ? 'Action Complete'
+                  : feedbackModal.type === 'error'
+                    ? 'Action Failed'
+                    : 'Notice'}
+            </h3>
+            <p className={`mt-2 text-sm ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+              {toText(feedbackModal.message)}
+            </p>
+            {toText(feedbackModal.detail) ? (
+              <p className={`mt-2 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                {toText(feedbackModal.detail)}
+              </p>
+            ) : null}
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setFeedbackModal((current) => ({ ...current, open: false }))}
+                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {!permissionGate.allGranted ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
