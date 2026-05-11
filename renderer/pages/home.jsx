@@ -89,6 +89,7 @@ export default function HomePage() {
   const [roomId, setRoomId] = useState('')
   const [isCheckingRoom, setIsCheckingRoom] = useState(false)
   const [feedback, setFeedback] = useState('')
+  const [addressCopiedFlash, setAddressCopiedFlash] = useState(false)
   const [hasAcceptedPolicy, setHasAcceptedPolicy] = useState(false)
   const [deviceId, setDeviceId] = useState('')
   const [deviceName, setDeviceName] = useState('')
@@ -121,6 +122,7 @@ export default function HomePage() {
   const resumeHintTimeoutRef = useRef(null)
   const hadResumeTokenRef = useRef(false)
   const sessionAddressInputRef = useRef(null)
+  const addressCopyFlashTimeoutRef = useRef(null)
   const router = useRouter()
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
@@ -147,9 +149,12 @@ export default function HomePage() {
   const shouldPushHomeNotification = (text, type) => {
     if (!text) return false
     if (type === 'error') return true
+    const lower = text.toLowerCase()
     return (
-      text.includes('Opening session') ||
-      text.includes('Incoming request')
+      lower.includes('opening session') ||
+      lower.includes('incoming request') ||
+      lower.includes('copied') ||
+      lower.includes('clipboard')
     )
   }
 
@@ -290,6 +295,14 @@ export default function HomePage() {
 
   useEffect(() => {
     checkPermissions()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (addressCopyFlashTimeoutRef.current) {
+        window.clearTimeout(addressCopyFlashTimeoutRef.current)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -736,8 +749,18 @@ export default function HomePage() {
     if (!deviceId || typeof navigator === 'undefined') return
     try {
       await navigator.clipboard.writeText(deviceId)
+      lastNotifiedMessageRef.current = ''
       setFeedbackWithAlert('Address copied to clipboard.', 'success')
+      setAddressCopiedFlash(true)
+      if (addressCopyFlashTimeoutRef.current) {
+        window.clearTimeout(addressCopyFlashTimeoutRef.current)
+      }
+      addressCopyFlashTimeoutRef.current = window.setTimeout(() => {
+        setAddressCopiedFlash(false)
+        addressCopyFlashTimeoutRef.current = null
+      }, 2200)
     } catch (error) {
+      setAddressCopiedFlash(false)
       setFeedbackWithAlert('Could not copy address.', 'error')
     }
   }
@@ -780,21 +803,18 @@ export default function HomePage() {
       <div className={`pointer-events-none absolute -bottom-24 -right-20 h-80 w-80 rounded-full blur-3xl ${isDark ? 'bg-emerald-500/10' : 'bg-emerald-300/30'}`} />
       <div className={`relative z-10 w-full h-full overflow-hidden grid grid-rows-[auto_auto_minmax(0,1fr)] ${isDark ? 'bg-[#121a2c]/95' : 'bg-white/95'}`}>
         <header
-          className={`px-3 sm:px-5 py-2 border-b ${isDark ? 'border-slate-800 bg-[#0f172a]/90' : 'border-slate-200 bg-slate-50/90'}`}
+          className={`px-3 sm:px-5 py-2 border-b flex items-center justify-between ${isDark ? 'border-slate-800 bg-[#0f172a]/90' : 'border-slate-200 bg-slate-50/90'}`}
         >
           <div className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-2">
             <div className="flex items-center gap-2 shrink-0">
               <h1 className={`text-lg sm:text-xl md:text-2xl font-bold tracking-tight ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>
                 Remotix
               </h1>
-              <span className={`text-[10px] sm:text-[11px] px-1.5 sm:px-2 py-0.5 rounded-full border ${isDark ? 'border-slate-600 text-slate-300' : 'border-slate-300 text-slate-600'}`}>
-                Desktop
-              </span>
             </div>
 
             <div
               className={`flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5 rounded-lg px-1.5 py-1 sm:px-2 ${
-                isDark ? 'bg-slate-900/50 border border-slate-700/80' : 'bg-white/80 border border-slate-200'
+                isDark ? 'bg-slate-900/50' : 'bg-white/80'
               }`}
               title="Connect to a remote address. Host must approve before the session opens."
             >
@@ -928,9 +948,17 @@ export default function HomePage() {
               <button
                 type="button"
                 onClick={copyDeviceId}
-                className={`text-xs px-2.5 py-1 rounded border ${isDark ? 'border-slate-600 bg-slate-800' : 'border-slate-300 bg-white'}`}
+                className={`text-xs px-2.5 py-1 rounded border transition-colors duration-200 ${
+                  addressCopiedFlash
+                    ? isDark
+                      ? 'border-emerald-500/80 bg-emerald-950/50 text-emerald-200'
+                      : 'border-emerald-500 bg-emerald-50 text-emerald-800'
+                    : isDark
+                      ? 'border-slate-600 bg-slate-800'
+                      : 'border-slate-300 bg-white'
+                }`}
               >
-                Copy
+                {addressCopiedFlash ? 'Copied!' : 'Copy'}
               </button>
               <button
                 type="button"
@@ -971,9 +999,11 @@ export default function HomePage() {
                     type="button"
                     onClick={tile.onClick}
                     disabled={tile.disabled || isServiceLocked}
-                    className="mt-3 text-xs font-semibold underline underline-offset-2 disabled:opacity-60"
+                    className={`mt-3 text-xs font-semibold underline underline-offset-2 transition-colors disabled:opacity-60 ${
+                      tile.title === 'Always Ready' && addressCopiedFlash ? 'decoration-emerald-200 text-emerald-100' : ''
+                    }`}
                   >
-                    {toText(tile.action)}
+                    {tile.title === 'Always Ready' && addressCopiedFlash ? 'Copied!' : toText(tile.action)}
                   </button>
                 </div>
               ))}
