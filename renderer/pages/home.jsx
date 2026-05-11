@@ -929,7 +929,7 @@ export default function HomePage() {
                 <ThemeGlyph isDark={isDark} />
               </button>
               {isServiceLocked ? (
-                <span className={`shrink-0 rounded-full border px-2 py-1 text-[10px] sm:text-xs ${isDark ? 'bg-red-700/40 text-red-300 border-red-500/40' : 'bg-red-100 text-red-700 border-red-300'}`}>
+                <span className="shrink-0 rounded-full border border-slate-600 bg-slate-800 px-2 py-1 text-[10px] sm:text-xs text-white">
                   Locked
                 </span>
               ) : null}
@@ -1099,7 +1099,9 @@ export default function HomePage() {
               id="home-feedback-title"
               className={`text-base font-semibold ${
                 feedbackModal.type === 'success'
-                    ? (isDark ? 'text-emerald-200' : 'text-emerald-700')
+                  ? (isDark ? 'text-emerald-200' : 'text-emerald-700')
+                  : feedbackModal.type === 'error'
+                    ? (isDark ? 'text-red-300' : 'text-red-700')
                     : (isDark ? 'text-slate-100' : 'text-slate-900')
               }`}
             >

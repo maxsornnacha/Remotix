@@ -85,6 +85,7 @@ export default function ClientPage() {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [lastInputEvent, setLastInputEvent] = useState('No input yet')
   const [hasRemoteStream, setHasRemoteStream] = useState(false)
+  const [isAwaitingFirstFrame, setIsAwaitingFirstFrame] = useState(true)
   const [isSignalingActive, setIsSignalingActive] = useState(false)
   const [isPeerConnected, setIsPeerConnected] = useState(false)
   const [controlProfile, setControlProfile] = useState('normal')
@@ -467,8 +468,10 @@ export default function ClientPage() {
     })
 
     peer.on('stream', (stream) => {
-      // Keep loading UI active until we can attach and render frames.
-      setHasRemoteStream(false)
+      // Mark stream presence immediately so frame-health monitors can run,
+      // even when first decoded frame arrives a bit later.
+      setHasRemoteStream(true)
+      setIsAwaitingFirstFrame(true)
       lastRemoteStreamRef.current = stream
       setRemoteStreamRevision((current) => current + 1)
       sessionEngineRef.current?.clearTimeoutTask('stream-timeout')
@@ -497,7 +500,7 @@ export default function ClientPage() {
           setStatus('Live stream ready. Click on video to control.', 'success')
           return
         }
-        setHasRemoteStream(false)
+        setHasRemoteStream(true)
         setStatus('Stream received. Waiting for first video frames...', 'info')
       })
 
@@ -534,6 +537,7 @@ export default function ClientPage() {
 
     peer.on('close', () => {
       setIsPeerConnected(false)
+      setIsAwaitingFirstFrame(true)
       const didSchedule = sessionEngineRef.current?.scheduleRecovery(
         SESSION_RECOVERY.PEER,
         reconnectSession,
@@ -1133,6 +1137,7 @@ export default function ClientPage() {
       videoRef.current.srcObject = null
     }
     setHasRemoteStream(false)
+    setIsAwaitingFirstFrame(true)
     setIsPeerConnected(false)
     setIsSignalingActive(false)
     setLatencyMs(null)
@@ -1165,13 +1170,7 @@ export default function ClientPage() {
   const sessionPhaseLabel = getSessionPhaseMessage(sessionPhase, 'client')
   const effectiveSessionStatus = toText(sessionStatus) || sessionPhaseLabel
   const quality = getConnectionQualityDescriptor(latencyMs, sessionPhase)
-  const qualityClass = quality.tone === 'healthy'
-    ? (isDark ? 'bg-emerald-700/30 border-emerald-500/40 text-emerald-200' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
-    : quality.tone === 'warning'
-      ? (isDark ? 'bg-amber-700/30 border-amber-500/40 text-amber-200' : 'bg-amber-100 border-amber-300 text-amber-700')
-      : quality.tone === 'critical'
-        ? (isDark ? 'bg-red-700/30 border-red-500/40 text-red-200' : 'bg-red-100 border-red-300 text-red-700')
-        : (isDark ? 'bg-slate-700/40 border-slate-500/40 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700')
+  const qualityClass = 'bg-slate-800 border-slate-600 text-white'
 
   useEffect(() => {
     const engine = sessionEngineRef.current
@@ -1179,6 +1178,7 @@ export default function ClientPage() {
       engine?.clearTimeoutTask('connect-timeout')
       return
     }
+    setIsAwaitingFirstFrame(true)
     engine.setTimeoutTask('connect-timeout', 25000, () => {
       exitSessionFlow('Connection timed out. Returning to home.')
     })
@@ -1251,10 +1251,7 @@ export default function ClientPage() {
             >
               <ThemeGlyph isDark={isDark} />
             </button>
-            <span className={`px-2 py-1 rounded-full border ${isPointerLocked
-              ? (isDark ? 'bg-emerald-700/40 border-emerald-500/40 text-emerald-300' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
-              : (isDark ? 'bg-slate-700/50 border-slate-600 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700')
-            }`}>
+            <span className="px-2 py-1 rounded-full border bg-slate-800 border-slate-600 text-white">
               {isPointerLocked ? 'Control On' : canControlSession ? 'Approved' : 'Pending'}
             </span>
             <span className={`text-[11px] px-2 py-1 rounded-full border ${qualityClass}`}>
@@ -1291,15 +1288,21 @@ export default function ClientPage() {
                     className={`w-full h-full object-contain ${hasRemoteStream ? 'opacity-100' : 'opacity-0'}`}
                     onClick={requestPointerLock}
                     onLoadedData={() => {
-                      if (lastRemoteStreamRef.current) setHasRemoteStream(true)
+                      if (lastRemoteStreamRef.current) {
+                        setHasRemoteStream(true)
+                        setIsAwaitingFirstFrame(false)
+                      }
                     }}
                     onCanPlay={() => {
-                      if (lastRemoteStreamRef.current) setHasRemoteStream(true)
+                      if (lastRemoteStreamRef.current) {
+                        setHasRemoteStream(true)
+                        setIsAwaitingFirstFrame(false)
+                      }
                     }}
                   />
-                  {!hasRemoteStream ? (
+                  {isAwaitingFirstFrame ? (
                     <div className="absolute inset-0 flex items-center justify-center bg-black">
-                      <div className={`h-12 w-12 rounded-full border-4 border-t-transparent animate-spin ${
+                      <div className={`h-16 w-16 rounded-full border-4 border-t-transparent animate-spin ${
                         isDark ? 'border-slate-500' : 'border-slate-300'
                       }`} />
                     </div>

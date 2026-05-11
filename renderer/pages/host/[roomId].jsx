@@ -1482,13 +1482,7 @@ export default function HostPage() {
   const sessionPhaseLabel = getSessionPhaseMessage(sessionPhase, 'host')
   const effectiveHostNotice = toText(sessionNotice) || sessionPhaseLabel
   const quality = getConnectionQualityDescriptor(latencyMs, sessionPhase)
-  const qualityClass = quality.tone === 'healthy'
-    ? (isDark ? 'bg-emerald-700/30 border-emerald-500/40 text-emerald-200' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
-    : quality.tone === 'warning'
-      ? (isDark ? 'bg-amber-700/30 border-amber-500/40 text-amber-200' : 'bg-amber-100 border-amber-300 text-amber-700')
-      : quality.tone === 'critical'
-        ? (isDark ? 'bg-red-700/30 border-red-500/40 text-red-200' : 'bg-red-100 border-red-300 text-red-700')
-        : (isDark ? 'bg-slate-700/40 border-slate-500/40 text-slate-300' : 'bg-slate-100 border-slate-300 text-slate-700')
+  const qualityClass = 'bg-slate-800 border-slate-600 text-white'
 
   useEffect(() => {
     const engine = sessionEngineRef.current
@@ -1539,10 +1533,7 @@ export default function HostPage() {
             >
               <ThemeGlyph isDark={isDark} />
             </button>
-            <span className={`px-2 py-1 rounded-full border ${isSharing
-              ? (isDark ? 'bg-emerald-700/40 border-emerald-500/40 text-emerald-300' : 'bg-emerald-100 border-emerald-300 text-emerald-700')
-              : (isDark ? 'bg-amber-700/40 border-amber-500/40 text-amber-300' : 'bg-amber-100 border-amber-300 text-amber-700')
-            }`}>
+            <span className="px-2 py-1 rounded-full border bg-slate-800 border-slate-600 text-white">
               {isSharing ? 'Online' : isPreparingShare ? 'Preparing' : 'Idle'}
             </span>
             <span className={`text-[11px] px-2 py-1 rounded-full border ${qualityClass}`}>
@@ -1579,7 +1570,7 @@ export default function HostPage() {
                   </div>
                 ) : (
                   <div className="h-full min-h-[260px] md:min-h-[320px] flex items-center justify-center bg-black">
-                    <div className={`h-12 w-12 rounded-full border-4 border-t-transparent animate-spin ${
+                    <div className={`h-16 w-16 rounded-full border-4 border-t-transparent animate-spin ${
                       isDark ? 'border-slate-500' : 'border-slate-300'
                     }`} />
                   </div>
@@ -1721,17 +1712,7 @@ export default function HostPage() {
                       <div>
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-sm">{toText(request.clientDisplayName) || toText(status?.displayName) || 'Unknown Client'}</p>
-                          <span
-                            className={`text-[10px] px-2 py-0.5 rounded-full border ${
-                              isTrusted
-                                ? (isDark
-                                    ? 'bg-emerald-700/40 border-emerald-500/40 text-emerald-200'
-                                    : 'bg-emerald-100 border-emerald-300 text-emerald-700')
-                                : (isDark
-                                    ? 'bg-amber-700/40 border-amber-500/40 text-amber-200'
-                                    : 'bg-amber-100 border-amber-300 text-amber-700')
-                            }`}
-                          >
+                          <span className="text-[10px] px-2 py-0.5 rounded-full border bg-slate-800 border-slate-600 text-white">
                             {isTrusted ? 'Trusted Device' : 'New Device'}
                           </span>
                         </div>
