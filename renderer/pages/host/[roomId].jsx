@@ -297,7 +297,7 @@ export default function HostPage() {
       })
     }
     writeToken()
-    const tokenInterval = window.setInterval(writeToken, 10_000)
+    const tokenInterval = window.setInterval(writeToken, 25_000)
     return () => window.clearInterval(tokenInterval)
   }, [roomId, deviceId, name])
 
@@ -326,7 +326,7 @@ export default function HostPage() {
         videoWidth: videoRef.current?.videoWidth || 0,
         videoHeight: videoRef.current?.videoHeight || 0,
       })
-    }, 2000)
+    }, 6000)
   }
 
 
@@ -694,12 +694,18 @@ export default function HostPage() {
       if (!video || !canvas) return
       if (video.videoWidth === 0 || video.videoHeight === 0) return
 
-      const ctx = canvas.getContext('2d')
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
       if (!ctx) return
-      canvas.width = 32
-      canvas.height = 18
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      const sw = 28
+      const sh = 16
+      const sx = Math.max(0, Math.floor((vw - sw) / 2))
+      const sy = Math.max(0, Math.floor((vh - sh) / 2))
+      canvas.width = sw
+      canvas.height = sh
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh)
+      const frame = ctx.getImageData(0, 0, sw, sh).data
       let sum = 0
       for (let i = 0; i < frame.length; i += 4) {
         sum += frame[i] + frame[i + 1] + frame[i + 2]
@@ -709,13 +715,13 @@ export default function HostPage() {
         avgBrightness: Number(avgBrightness).toFixed(2),
         blackHits: blackFrameHitsRef.current,
       })
-      if (avgBrightness < 4) {
+      if (avgBrightness < 5) {
         blackFrameHitsRef.current += 1
       } else {
         blackFrameHitsRef.current = 0
       }
 
-      if (blackFrameHitsRef.current >= 3) {
+      if (blackFrameHitsRef.current >= 6) {
         stopStreamHealthMonitor()
         if (blackRecoveryInFlightRef.current) return
         blackRecoveryInFlightRef.current = true
@@ -732,7 +738,7 @@ export default function HostPage() {
           blackRecoveryInFlightRef.current = false
         })
       }
-    }, 1200)
+    }, 2800)
   }
 
   const validateStreamHasVisibleFrames = async (stream) => {
@@ -749,7 +755,7 @@ export default function HostPage() {
     const probeCanvas = document.createElement('canvas')
     probeCanvas.width = 32
     probeCanvas.height = 18
-    const ctx = probeCanvas.getContext('2d')
+    const ctx = probeCanvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) return false
 
     // Sample a few frames to avoid false negatives.
@@ -763,7 +769,7 @@ export default function HostPage() {
         sum += frame[i] + frame[i + 1] + frame[i + 2]
       }
       const avgBrightness = sum / (frame.length / 4) / 3
-      if (avgBrightness >= 4) return true
+      if (avgBrightness >= 5) return true
     }
     return false
   }
@@ -1104,7 +1110,7 @@ export default function HostPage() {
       socket.once('connect', emitHeartbeat)
     }
 
-    const heartbeatId = window.setInterval(emitHeartbeat, 8000)
+    const heartbeatId = window.setInterval(emitHeartbeat, 12_000)
     return () => {
       window.clearInterval(heartbeatId)
       socket.off('connect', emitHeartbeat)
@@ -1310,6 +1316,9 @@ export default function HostPage() {
         await attachStreamToPreview(stream)
         setIsSharing(true)
         sessionEngineRef.current?.markHealthy()
+        console.info(
+          '[host][performance] Sharing a display that includes this Remotix window causes very high CPU/GPU (recursive capture). Prefer another monitor or a window that does not show Remotix.',
+        )
         startStreamHealthMonitor()
         announceHandshakeReady()
         if (pendingPeerIdRef.current) {

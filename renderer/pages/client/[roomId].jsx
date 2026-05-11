@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/router'
 import Peer from 'simple-peer'
 import { getSocket } from '../../libs/socket';
@@ -83,7 +83,6 @@ export default function ClientPage() {
   const [sessionStatus, setSessionStatus] = useState('')
   const [isPointerLocked, setIsPointerLocked] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [lastInputEvent, setLastInputEvent] = useState('No input yet')
   const [hasRemoteStream, setHasRemoteStream] = useState(false)
   const [isAwaitingFirstFrame, setIsAwaitingFirstFrame] = useState(true)
   const [isSignalingActive, setIsSignalingActive] = useState(false)
@@ -117,6 +116,25 @@ export default function ClientPage() {
   const qualityCandidateHitsRef = useRef(0)
   const lastEmittedQualityRef = useRef('')
   const lastQualityEmitAtRef = useRef(0)
+  const debugSeqRef = useRef(0)
+  const attachAttemptRef = useRef(0)
+  const attachInFlightRef = useRef(null)
+  const attachStreamRef = useRef(null)
+  const lastStreamRefreshAtRef = useRef(0)
+  const lastVideoCurrentTimeProbeRef = useRef(null)
+  const hasAnnouncedStreamLiveRef = useRef(false)
+  /** After client window resize / minimize / fullscreen, skip stream probes briefly (avoids false no-frame/black). */
+  const clientUiSettleUntilRef = useRef(0)
+  const CLIENT_LAYOUT_SETTLE_MS = 2500
+  const debugStateRef = useRef({
+    hasRemoteStream: false,
+    isAwaitingFirstFrame: true,
+    isPeerConnected: false,
+    isSignalingActive: false,
+    sessionPhase: SESSION_PHASE.IDLE,
+    remoteStreamRevision: 0,
+    roomLabel: '',
+  })
   const { isDark, toggleTheme } = useTheme()
   const canControlSession = Boolean(approvedRoomId)
   const isWaitingForHostApproval =
@@ -136,6 +154,7 @@ export default function ClientPage() {
         setSessionPhase(phase)
         if (phase === SESSION_PHASE.RECOVERING) {
           setStatus('Connection interrupted. Recovering automatically...')
+          hasAnnouncedStreamLiveRef.current = false
         }
         if (
           phase !== lastPhaseToastRef.current &&
@@ -158,6 +177,88 @@ export default function ClientPage() {
       sessionEngineRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    debugStateRef.current = {
+      hasRemoteStream,
+      isAwaitingFirstFrame,
+      isPeerConnected,
+      isSignalingActive,
+      sessionPhase,
+      remoteStreamRevision,
+      roomLabel: toText(approvedRoomId || roomId),
+    }
+  }, [
+    hasRemoteStream,
+    isAwaitingFirstFrame,
+    isPeerConnected,
+    isSignalingActive,
+    sessionPhase,
+    remoteStreamRevision,
+    approvedRoomId,
+    roomId,
+  ])
+
+  const logVideoDebug = useCallback((event, payload = {}) => {
+    debugSeqRef.current += 1
+    const s = debugStateRef.current
+    const v = videoRef.current
+    const stream = lastRemoteStreamRef.current
+    const videoTrack = stream?.getVideoTracks?.()?.[0]
+    const audioTrack = stream?.getAudioTracks?.()?.[0]
+    const videoEl = v
+      ? {
+          paused: v.paused,
+          muted: v.muted,
+          volume: v.volume,
+          readyState: v.readyState,
+          networkState: v.networkState,
+          currentTime: Number(v.currentTime ?? 0).toFixed(4),
+          duration: Number.isFinite(v.duration) ? v.duration : null,
+          videoWidth: v.videoWidth,
+          videoHeight: v.videoHeight,
+          srcObjectSet: Boolean(v.srcObject),
+          srcObjectSameAsStream: v.srcObject === stream,
+        }
+      : null
+    const trackSnap = (t) =>
+      t
+        ? {
+            id: t.id,
+            kind: t.kind,
+            label: t.label,
+            enabled: t.enabled,
+            muted: t.muted,
+            readyState: t.readyState,
+          }
+        : null
+    console.log('[client][video-debug]', {
+      seq: debugSeqRef.current,
+      event,
+      ts: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
+      iso: new Date().toISOString(),
+      ...s,
+      visibility: typeof document !== 'undefined' ? document.visibilityState : null,
+      documentHidden: typeof document !== 'undefined' ? document.hidden : null,
+      fullscreen: typeof document !== 'undefined' ? Boolean(document.fullscreenElement) : null,
+      pointerLockTarget:
+        typeof document !== 'undefined' && document.pointerLockElement === videoRef.current
+          ? 'video'
+          : document.pointerLockElement
+            ? 'other'
+            : null,
+      video: videoEl,
+      streamId: stream?.id ?? null,
+      videoTrack: trackSnap(videoTrack),
+      audioTrack: trackSnap(audioTrack),
+      ...payload,
+    })
+  }, [])
+
+  const bumpClientLayoutSettle = useCallback((reason) => {
+    clientUiSettleUntilRef.current = Date.now() + CLIENT_LAYOUT_SETTLE_MS
+    logVideoDebug('client-layout-settle-bump', { reason, settleUntil: clientUiSettleUntilRef.current })
+  }, [logVideoDebug])
 
   const setStatus = (message, type = 'info') => {
     const text = toText(message)
@@ -262,57 +363,168 @@ export default function ClientPage() {
   }
 
   const attachRemoteStream = async (stream) => {
-    if (!videoRef.current) return false
+    if (!videoRef.current) {
+      logVideoDebug('attach-abort-no-video-element')
+      return false
+    }
+    if (attachInFlightRef.current && attachStreamRef.current === stream) {
+      logVideoDebug('attach-await-inflight-same-stream')
+      try {
+        return await attachInFlightRef.current
+      } catch (_e) {
+        return false
+      }
+    }
+
+    attachAttemptRef.current += 1
+    const attemptId = attachAttemptRef.current
     lastRemoteStreamRef.current = stream
     const videoTracks = stream?.getVideoTracks?.() || []
     const hasLiveVideoTrack = videoTracks.some((track) => track?.readyState === 'live')
+    logVideoDebug('attach-enter', {
+      attemptId,
+      streamId: stream?.id,
+      trackCount: videoTracks.length,
+      trackStates: videoTracks.map((t) => ({ id: t.id, readyState: t.readyState, muted: t.muted })),
+      hasLiveVideoTrack,
+    })
     if (!hasLiveVideoTrack) {
       console.log('[client][stream] no live video track yet, waiting for track readiness')
+      logVideoDebug('attach-exit-no-live-track', { attemptId })
       return false
     }
-    videoRef.current.srcObject = stream
-    try {
-      await videoRef.current.play()
-      const renderReady = await new Promise((resolve) => {
-        const startedAt = Date.now()
-        const check = () => {
-          const video = videoRef.current
-          if (!video) return resolve(false)
-          const hasFrame = video.videoWidth > 0 && video.videoHeight > 0
-          const hasPlaybackProgress = Number(video.currentTime || 0) > 0
-          if (hasFrame || hasPlaybackProgress) {
-            resolve(true)
-            return
-          }
-          if (Date.now() - startedAt > 2400) {
-            resolve(false)
-            return
-          }
-          window.setTimeout(check, 120)
-        }
-        check()
-      })
-      window.setTimeout(() => {
-        const video = videoRef.current
-        const track = stream?.getVideoTracks?.()[0]
-        console.log('[client][stream][diagnostics]', {
-          trackReadyState: track?.readyState || 'unknown',
-          trackMuted: Boolean(track?.muted),
-          videoWidth: video?.videoWidth || 0,
-          videoHeight: video?.videoHeight || 0,
-          videoCurrentTime: Number(video?.currentTime || 0).toFixed(3),
-          videoReadyState: video?.readyState ?? -1,
+
+    const attachTask = (async () => {
+      const video = videoRef.current
+      if (!video) return false
+      const hadDifferentSrc = video.srcObject !== stream
+      if (hadDifferentSrc) {
+        video.srcObject = stream
+        logVideoDebug('attach-set-srcObject', { attemptId, hadDifferentSrc: true })
+      } else {
+        logVideoDebug('attach-skip-srcObject-same-stream', { attemptId })
+      }
+      try {
+        const playStartedAt = Date.now()
+        logVideoDebug('attach-play-before', {
+          attemptId,
+          pausedBefore: video.paused,
+          readyStateBefore: video.readyState,
         })
-      }, 1000)
-      return renderReady
-    } catch (error) {
-      console.error('[client][stream] video play failed', error)
-      setStatus('Connected, but video playback is blocked. Click Enter Control and try again.', 'error')
-      return false
+        if (video.paused) {
+          await video.play()
+        }
+        logVideoDebug('attach-play-after', {
+          attemptId,
+          playMs: Date.now() - playStartedAt,
+          pausedAfter: video.paused,
+          readyStateAfter: video.readyState,
+          currentTimeAfter: Number(video.currentTime || 0).toFixed(4),
+          videoWxH: `${video.videoWidth}x${video.videoHeight}`,
+        })
+
+        const quickReady = () => {
+          const el = videoRef.current
+          if (!el) return false
+          if (el.videoWidth > 0 && el.videoHeight > 0) return true
+          if (Number(el.currentTime || 0) > 0.01) return true
+          if (el.readyState >= 2) return true
+          return false
+        }
+
+        if (quickReady()) {
+          logVideoDebug('attach-ready-immediate', { attemptId })
+          return true
+        }
+
+        const settled = await new Promise((resolve) => {
+          const startedAt = Date.now()
+          const maxWait = 1800
+          const tick = () => {
+            if (attemptId !== attachAttemptRef.current) {
+              logVideoDebug('attach-render-poll-superseded', {
+                attemptId,
+                supersededBy: attachAttemptRef.current,
+              })
+              resolve('superseded')
+              return
+            }
+            if (quickReady()) {
+              logVideoDebug('attach-render-ready', {
+                attemptId,
+                waitedMs: Date.now() - startedAt,
+              })
+              resolve(true)
+              return
+            }
+            if (Date.now() - startedAt > maxWait) {
+              const track = stream?.getVideoTracks?.()[0]
+              const stillLive = track?.readyState === 'live'
+              logVideoDebug('attach-render-timeout-soft', {
+                attemptId,
+                waitedMs: Date.now() - startedAt,
+                stillLive,
+              })
+              resolve(stillLive)
+              return
+            }
+            window.setTimeout(tick, 160)
+          }
+          tick()
+        })
+
+        if (settled === 'superseded') return false
+        if (settled === true) return true
+
+        window.setTimeout(() => {
+          const v = videoRef.current
+          const track = stream?.getVideoTracks?.()[0]
+          console.log('[client][stream][diagnostics]', {
+            trackReadyState: track?.readyState || 'unknown',
+            trackMuted: Boolean(track?.muted),
+            videoWidth: v?.videoWidth || 0,
+            videoHeight: v?.videoHeight || 0,
+            videoCurrentTime: Number(v?.currentTime || 0).toFixed(3),
+            videoReadyState: v?.readyState ?? -1,
+          })
+          logVideoDebug('attach-post-diagnostics-tick', {
+            attemptId,
+            superseded: attemptId !== attachAttemptRef.current,
+          })
+        }, 900)
+
+        logVideoDebug('attach-exit', { attemptId, renderReady: Boolean(settled) })
+        return Boolean(settled)
+      } catch (error) {
+        console.error('[client][stream] video play failed', error)
+        logVideoDebug('attach-play-error', {
+          attemptId,
+          name: error?.name,
+          message: toText(error?.message),
+        })
+        setStatus('Connected, but video playback is blocked. Click Enter Control and try again.', 'error')
+        return false
+      }
+    })()
+
+    attachStreamRef.current = stream
+    attachInFlightRef.current = attachTask
+    try {
+      const result = await attachTask
+      return result
+    } finally {
+      if (attachInFlightRef.current === attachTask) {
+        attachInFlightRef.current = null
+        attachStreamRef.current = null
+      }
     }
   }
 
   const reconnectSession = () => {
+    logVideoDebug('reconnect-session-start')
+    hasAnnouncedStreamLiveRef.current = false
+    lastStreamRefreshAtRef.current = 0
+    lastVideoCurrentTimeProbeRef.current = null
     const activeRoomId = toText(approvedRoomId || joinedRoomRef.current || roomId)
     if (!activeRoomId) {
       setStatus('Reconnect is not available yet.', 'error')
@@ -330,10 +542,29 @@ export default function ClientPage() {
 
   const requestPointerLock = () => {
     if (!canControlSession) return
-    if (videoRef.current) {
-      videoRef.current.requestPointerLock();
+    const el = videoRef.current
+    if (!el) {
+      logVideoDebug('pointer-lock-skip-no-video')
+      return
     }
-  };
+    logVideoDebug('pointer-lock-request')
+    try {
+      const maybePromise = el.requestPointerLock?.()
+      if (maybePromise && typeof maybePromise.catch === 'function') {
+        maybePromise.catch((err) => {
+          logVideoDebug('pointer-lock-request-rejected', {
+            name: err?.name,
+            message: toText(err?.message),
+          })
+        })
+      }
+    } catch (err) {
+      logVideoDebug('pointer-lock-request-throw', {
+        name: err?.name,
+        message: toText(err?.message),
+      })
+    }
+  }
 
   const toggleFullscreen = async () => {
     const viewport = remoteViewportRef.current
@@ -365,6 +596,11 @@ export default function ClientPage() {
       tracks.forEach((track) => track.stop())
       videoRef.current.srcObject = null
     }
+    attachInFlightRef.current = null
+    attachStreamRef.current = null
+    hasAnnouncedStreamLiveRef.current = false
+    lastStreamRefreshAtRef.current = 0
+    lastVideoCurrentTimeProbeRef.current = null
     setHasRemoteStream(false)
     setIsPeerConnected(false)
     setIsSignalingActive(false)
@@ -384,6 +620,7 @@ export default function ClientPage() {
 
   const togglePointerLock = () => {
     if (document.pointerLockElement === videoRef.current) {
+      logVideoDebug('pointer-lock-exit')
       document.exitPointerLock()
       return
     }
@@ -411,7 +648,7 @@ export default function ClientPage() {
       })
     }
     writeToken()
-    const tokenInterval = window.setInterval(writeToken, 10_000)
+    const tokenInterval = window.setInterval(writeToken, 25_000)
     return () => window.clearInterval(tokenInterval)
   }, [approvedRoomId, roomId, deviceId, name, targetHostDeviceId])
 
@@ -420,11 +657,15 @@ export default function ClientPage() {
       const isLocked = document.pointerLockElement === videoRef.current;
       setIsPointerLocked(isLocked)
       document.body.style.cursor = isLocked ? 'none' : 'default';
-    };
+      logVideoDebug('pointer-lock-state-change', { isLocked })
+    }
   
     const handlePointerLockError = () => {
-      console.error('❌ Pointer Lock failed');
-    };
+      console.error('Pointer Lock failed')
+      logVideoDebug('pointer-lock-error', {
+        pointerLockElement: document.pointerLockElement?.tagName ?? null,
+      })
+    }
   
     document.addEventListener('pointerlockchange', handlePointerLockChange);
     document.addEventListener('pointerlockerror', handlePointerLockError);
@@ -433,15 +674,36 @@ export default function ClientPage() {
       document.removeEventListener('pointerlockchange', handlePointerLockChange);
       document.removeEventListener('pointerlockerror', handlePointerLockError);
     };
-  }, []);  
+  }, [logVideoDebug])
 
   useEffect(() => {
     const onFullscreenChange = () => {
       setIsFullscreen(Boolean(document.fullscreenElement))
+      bumpClientLayoutSettle('fullscreen')
+      logVideoDebug('fullscreen-change', {
+        isFullscreen: Boolean(document.fullscreenElement),
+      })
     }
     document.addEventListener('fullscreenchange', onFullscreenChange)
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
-  }, [])
+  }, [logVideoDebug, bumpClientLayoutSettle])
+
+  useEffect(() => {
+    const onVisibility = () => {
+      bumpClientLayoutSettle(`visibility-${document.visibilityState}`)
+      logVideoDebug('document-visibilitychange')
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [logVideoDebug, bumpClientLayoutSettle])
+
+  useEffect(() => {
+    const onResize = () => {
+      bumpClientLayoutSettle('window-resize')
+    }
+    window.addEventListener('resize', onResize, { passive: true })
+    return () => window.removeEventListener('resize', onResize)
+  }, [bumpClientLayoutSettle])
 
   const peerRef = useRef(null)
 
@@ -470,6 +732,14 @@ export default function ClientPage() {
     peer.on('stream', (stream) => {
       // Mark stream presence immediately so frame-health monitors can run,
       // even when first decoded frame arrives a bit later.
+      logVideoDebug('peer-on-stream', {
+        streamId: stream?.id,
+        active: stream?.active,
+        audioTracks: stream?.getAudioTracks?.()?.length ?? 0,
+        videoTracks: stream?.getVideoTracks?.()?.length ?? 0,
+      })
+      hasAnnouncedStreamLiveRef.current = false
+      lastVideoCurrentTimeProbeRef.current = null
       setHasRemoteStream(true)
       setIsAwaitingFirstFrame(true)
       lastRemoteStreamRef.current = stream
@@ -487,22 +757,10 @@ export default function ClientPage() {
       if (videoTrack) {
         videoTrack.onunmute = () => {
           console.log('[client][stream] video track unmuted, retry attach')
+          logVideoDebug('peer-video-track-onunmute-retry-attach')
           setRemoteStreamRevision((current) => current + 1)
-          void attachRemoteStream(stream).then((ok) => {
-            if (ok) setHasRemoteStream(true)
-          })
         }
       }
-      attachRemoteStream(stream).then((ok) => {
-        if (ok) {
-          setHasRemoteStream(true)
-          sessionEngineRef.current?.markHealthy()
-          setStatus('Live stream ready. Click on video to control.', 'success')
-          return
-        }
-        setHasRemoteStream(true)
-        setStatus('Stream received. Waiting for first video frames...', 'info')
-      })
 
       const ownerDeviceId = firstQueryString(deviceId).trim()
       const peerDeviceId =
@@ -526,6 +784,13 @@ export default function ClientPage() {
 
     peer.on('track', (_track, stream) => {
       if (!stream) return
+      logVideoDebug('peer-on-track', {
+        trackKind: _track?.kind,
+        trackId: _track?.id,
+        trackReadyState: _track?.readyState,
+        streamId: stream?.id,
+      })
+      hasAnnouncedStreamLiveRef.current = false
       lastRemoteStreamRef.current = stream
       setRemoteStreamRevision((current) => current + 1)
     })
@@ -536,6 +801,7 @@ export default function ClientPage() {
     })
 
     peer.on('close', () => {
+      logVideoDebug('peer-close')
       setIsPeerConnected(false)
       setIsAwaitingFirstFrame(true)
       const didSchedule = sessionEngineRef.current?.scheduleRecovery(
@@ -548,6 +814,7 @@ export default function ClientPage() {
     })
 
     peer.on('connect', () => {
+      logVideoDebug('peer-webrtc-connect')
       setIsPeerConnected(true)
       sessionEngineRef.current?.setPhase(SESSION_PHASE.HANDSHAKING)
     })
@@ -836,7 +1103,6 @@ export default function ClientPage() {
       const room = activeRoomId()
       if (!room) return
       socket.emit('mouse-click', { button: e.button, roomId: room })
-      setLastInputEvent(`Mouse click (${e.button})`)
     }
 
     const handleMouseDown = (e) => {
@@ -844,7 +1110,6 @@ export default function ClientPage() {
       const room = activeRoomId()
       if (!room) return
       socket.emit('mouse-down', { button: e.button, roomId: room })
-      setLastInputEvent(`Mouse down (${e.button})`)
     }
 
     const handleMouseUp = (e) => {
@@ -852,7 +1117,6 @@ export default function ClientPage() {
       const room = activeRoomId()
       if (!room) return
       socket.emit('mouse-up', { button: e.button, roomId: room })
-      setLastInputEvent(`Mouse up (${e.button})`)
     }
 
     const handleWheel = (e) => {
@@ -864,7 +1128,6 @@ export default function ClientPage() {
         deltaY: e.deltaY,
         roomId: room,
       })
-      setLastInputEvent('Mouse scroll')
     }
 
     const handleKeyUp = (e) => {
@@ -873,7 +1136,6 @@ export default function ClientPage() {
       if (!room) return
       pressedKeysRef.current.delete(e.code)
       socket.emit('key-up', { code: e.code, roomId: room });
-      setLastInputEvent(`Key up (${e.code})`)
     };
 
     const handleKeyDown = (e) => {
@@ -883,7 +1145,6 @@ export default function ClientPage() {
       if (pressedKeysRef.current.has(e.code)) return
       pressedKeysRef.current.add(e.code)
       socket.emit('key-down', { code: e.code, roomId: room })
-      setLastInputEvent(`Key down (${e.code})`)
     }
 
     window.addEventListener('mousemove', handleMouseMove)
@@ -912,74 +1173,98 @@ export default function ClientPage() {
   }, [roomId, approvedRoomId, controlProfile])
 
   useEffect(() => {
-    if (!lastRemoteStreamRef.current || !videoRef.current) return
-    let retryCount = 0
-    let retryTimer = null
-    const tryAttach = () => {
-      void attachRemoteStream(lastRemoteStreamRef.current).then((ok) => {
-        if (ok) {
-          setHasRemoteStream(true)
-          return
-        }
-        if (retryCount >= 8) return
-        retryCount += 1
-        retryTimer = window.setTimeout(tryAttach, 250)
-      })
+    logVideoDebug('effect-hasRemoteStream', { hasRemoteStream })
+    if (!hasRemoteStream && videoRef.current && !lastRemoteStreamRef.current) {
+      videoRef.current.pause()
+      videoRef.current.srcObject = null
+      attachInFlightRef.current = null
+      attachStreamRef.current = null
+      logVideoDebug('effect-hasRemoteStream-cleared-video')
     }
-    tryAttach()
-    return () => {
-      if (retryTimer) window.clearTimeout(retryTimer)
-    }
-  }, [remoteStreamRevision])
-
-  useEffect(() => {
-    if (!hasRemoteStream) {
-      if (videoRef.current && !lastRemoteStreamRef.current) {
-        videoRef.current.pause()
-        videoRef.current.srcObject = null
-      }
-      return
-    }
-    if (!videoRef.current || !lastRemoteStreamRef.current) return
-    void attachRemoteStream(lastRemoteStreamRef.current)
-  }, [hasRemoteStream])
+  }, [hasRemoteStream, logVideoDebug])
 
   useEffect(() => {
     if (!hasRemoteStream) return
+    const STREAM_REFRESH_COOLDOWN_MS = 22_000
+    const NO_FRAME_HITS_BEFORE_REFRESH = 10
+    const BLACK_FRAME_HITS_BEFORE_REFRESH = 6
+    const PROBE_INTERVAL_MS = 2800
+
+    const requestHostRefresh = (reason, activeRoomId) => {
+      if (!activeRoomId) return
+      const now = Date.now()
+      if (now - lastStreamRefreshAtRef.current < STREAM_REFRESH_COOLDOWN_MS) {
+        logVideoDebug('client-request-stream-refresh-skipped-cooldown', {
+          reason,
+          msSinceLast: now - lastStreamRefreshAtRef.current,
+        })
+        return
+      }
+      lastStreamRefreshAtRef.current = now
+      blackRefreshRequestedRef.current = true
+      if (reason === 'client-no-frame') {
+        setStatus('Stream connected but no video frames yet. Requesting host refresh...')
+      } else {
+        setStatus('Black screen detected. Requesting host refresh...')
+      }
+      logVideoDebug('client-request-stream-refresh', { reason, roomId: activeRoomId })
+      socket.emit('client-request-stream-refresh', {
+        roomId: activeRoomId,
+        reason,
+      })
+    }
+
     const intervalId = window.setInterval(() => {
+      const now = Date.now()
+      if (now < clientUiSettleUntilRef.current) {
+        return
+      }
+
       const video = videoRef.current
       const canvas = blackFrameCanvasRef.current
       if (!video || !canvas) return
+
+      const ct = Number(video.currentTime || 0)
+      const prevCt = lastVideoCurrentTimeProbeRef.current
+      if (prevCt !== null && ct > prevCt + 0.03) {
+        blackFrameHitsRef.current = 0
+        noFrameHitsRef.current = 0
+        blackRefreshRequestedRef.current = false
+      }
+      lastVideoCurrentTimeProbeRef.current = ct
+
+      const activeRoomId = toText(approvedRoomId || roomId)
+      if (!activeRoomId) return
+
       if (video.videoWidth === 0 || video.videoHeight === 0) {
         noFrameHitsRef.current += 1
-        if (noFrameHitsRef.current >= 5 && !blackRefreshRequestedRef.current) {
-          blackRefreshRequestedRef.current = true
+        if (noFrameHitsRef.current >= NO_FRAME_HITS_BEFORE_REFRESH) {
           noFrameHitsRef.current = 0
-          const activeRoomId = toText(approvedRoomId || roomId)
-          if (!activeRoomId) return
-          setStatus('Stream connected but no video frames yet. Requesting host refresh...')
-          socket.emit('client-request-stream-refresh', {
-            roomId: activeRoomId,
-            reason: 'client-no-frame',
-          })
+          requestHostRefresh('client-no-frame', activeRoomId)
         }
         return
       }
       noFrameHitsRef.current = 0
 
-      const ctx = canvas.getContext('2d')
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
       if (!ctx) return
-      canvas.width = 32
-      canvas.height = 18
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      const sw = 28
+      const sh = 16
+      const sx = Math.max(0, Math.floor((vw - sw) / 2))
+      const sy = Math.max(0, Math.floor((vh - sh) / 2))
+      canvas.width = sw
+      canvas.height = sh
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh)
+      const frame = ctx.getImageData(0, 0, sw, sh).data
       let sum = 0
       for (let i = 0; i < frame.length; i += 4) {
         sum += frame[i] + frame[i + 1] + frame[i + 2]
       }
       const avgBrightness = sum / (frame.length / 4) / 3
 
-      if (avgBrightness < 4) {
+      if (avgBrightness < 5) {
         blackFrameHitsRef.current += 1
       } else {
         blackFrameHitsRef.current = 0
@@ -987,32 +1272,14 @@ export default function ClientPage() {
         noFrameHitsRef.current = 0
       }
 
-      if (blackFrameHitsRef.current >= 3 && !blackRefreshRequestedRef.current) {
-        blackRefreshRequestedRef.current = true
+      if (blackFrameHitsRef.current >= BLACK_FRAME_HITS_BEFORE_REFRESH) {
         blackFrameHitsRef.current = 0
-        const activeRoomId = toText(approvedRoomId || roomId)
-        if (!activeRoomId) return
-        setStatus('Black screen detected. Requesting host refresh...')
-        socket.emit('client-request-stream-refresh', {
-          roomId: activeRoomId,
-          reason: 'client-black-frame',
-        })
+        requestHostRefresh('client-black-frame', activeRoomId)
       }
-    }, 1200)
+    }, PROBE_INTERVAL_MS)
 
     return () => window.clearInterval(intervalId)
-  }, [hasRemoteStream, approvedRoomId, roomId])
-
-  useEffect(() => {
-    if (hasRemoteStream) return
-    if (!lastRemoteStreamRef.current || !videoRef.current) return
-    const timer = window.setTimeout(() => {
-      void attachRemoteStream(lastRemoteStreamRef.current).then((ok) => {
-        if (ok) setHasRemoteStream(true)
-      })
-    }, 600)
-    return () => window.clearTimeout(timer)
-  }, [hasRemoteStream, sessionStatus])
+  }, [hasRemoteStream, approvedRoomId, roomId, logVideoDebug])
 
   useEffect(() => {
     if (hasRemoteStream) return
@@ -1039,14 +1306,20 @@ export default function ClientPage() {
         return
       }
       attempts += 1
-      void currentVideo.play().catch(() => {})
-      if (attempts >= 6) {
+      void currentVideo.play().catch((err) => {
+        logVideoDebug('effect-play-retry-failed', {
+          attempts,
+          name: err?.name,
+          message: toText(err?.message),
+        })
+      })
+      if (attempts >= 4) {
         window.clearInterval(retryTimer)
       }
-    }, 700)
+    }, 1000)
 
     return () => window.clearInterval(retryTimer)
-  }, [hasRemoteStream])
+  }, [hasRemoteStream, logVideoDebug])
 
   useEffect(() => {
     const room = toText(approvedRoomId || roomId)
@@ -1091,7 +1364,7 @@ export default function ClientPage() {
       }
     }
 
-    const timer = window.setInterval(detectConnectionLevel, 4000)
+    const timer = window.setInterval(detectConnectionLevel, 8000)
     return () => window.clearInterval(timer)
   }, [approvedRoomId, roomId, isPeerConnected, hasRemoteStream])
 
@@ -1118,6 +1391,11 @@ export default function ClientPage() {
       tracks.forEach((track) => track.stop())
       videoRef.current.srcObject = null
     }
+    attachInFlightRef.current = null
+    attachStreamRef.current = null
+    hasAnnouncedStreamLiveRef.current = false
+    lastStreamRefreshAtRef.current = 0
+    lastVideoCurrentTimeProbeRef.current = null
     setHasRemoteStream(false)
     setIsAwaitingFirstFrame(true)
     setIsPeerConnected(false)
@@ -1150,7 +1428,6 @@ export default function ClientPage() {
   const requiredClientSteps = clientConnectionSteps.filter((step) => step.key !== 'stream')
   const isClientDetailReady = requiredClientSteps.every((step) => step.done)
   const sessionPhaseLabel = getSessionPhaseMessage(sessionPhase, 'client')
-  const effectiveSessionStatus = toText(sessionStatus) || sessionPhaseLabel
   const quality = getConnectionQualityDescriptor(latencyMs, sessionPhase)
   const qualityClass = 'bg-slate-800 border-slate-600 text-white'
 
@@ -1168,6 +1445,104 @@ export default function ClientPage() {
       engine.clearTimeoutTask('connect-timeout')
     }
   }, [roomId, isClientDetailReady])
+
+  useEffect(() => {
+    if (!isClientDetailReady) return undefined
+    const stream = lastRemoteStreamRef.current
+    if (!stream) return undefined
+
+    let cancelled = false
+    let retryTimer = null
+    let attempt = 0
+    const maxAttempts = 14
+    const delayMs = 400
+
+    const run = async () => {
+      if (cancelled) return
+      if (!videoRef.current) {
+        attempt += 1
+        if (attempt < maxAttempts) {
+          retryTimer = window.setTimeout(run, delayMs)
+        }
+        return
+      }
+      logVideoDebug('effect-consolidated-attach-run', { attempt, remoteStreamRevision })
+      const ok = await attachRemoteStream(stream)
+      if (cancelled) return
+      if (ok) {
+        setHasRemoteStream(true)
+        setIsAwaitingFirstFrame(false)
+        sessionEngineRef.current?.markHealthy()
+        if (!hasAnnouncedStreamLiveRef.current) {
+          hasAnnouncedStreamLiveRef.current = true
+          setStatus('Live stream ready. Click on video to control.', 'success')
+        }
+        return
+      }
+      attempt += 1
+      if (attempt < maxAttempts) {
+        retryTimer = window.setTimeout(run, delayMs)
+      } else {
+        setHasRemoteStream(true)
+        setStatus('Stream received. Waiting for first video frames...', 'info')
+      }
+    }
+
+    run()
+    return () => {
+      cancelled = true
+      if (retryTimer) window.clearTimeout(retryTimer)
+      logVideoDebug('effect-consolidated-attach-cleanup')
+    }
+  }, [remoteStreamRevision, isClientDetailReady, logVideoDebug])
+
+  useEffect(() => {
+    if (!isClientDetailReady) return undefined
+    let cancelled = false
+    const entries = []
+    const timer = window.setTimeout(() => {
+      if (cancelled) return
+      const video = videoRef.current
+      if (!video) {
+        logVideoDebug('native-video-listeners-skip-no-element')
+        return
+      }
+      const names = [
+        'loadstart',
+        'loadedmetadata',
+        'loadeddata',
+        'canplay',
+        'canplaythrough',
+        'playing',
+        'waiting',
+        'stalled',
+        'suspend',
+        'emptied',
+        'pause',
+        'play',
+        'seeking',
+        'seeked',
+        'ended',
+        'error',
+        'resize',
+      ]
+      names.forEach((name) => {
+        const fn = () => logVideoDebug(`native-video-${name}`)
+        video.addEventListener(name, fn)
+        entries.push({ name, fn })
+      })
+      logVideoDebug('native-video-listeners-attached', { count: entries.length })
+    }, 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+      const video = videoRef.current
+      if (video && entries.length) {
+        entries.forEach(({ name, fn }) => video.removeEventListener(name, fn))
+        logVideoDebug('native-video-listeners-detached', { count: entries.length })
+      }
+    }
+  }, [isClientDetailReady, logVideoDebug])
 
   if (sessionEndedReason) {
     return (
@@ -1270,16 +1645,35 @@ export default function ClientPage() {
                     className={`w-full h-full object-contain ${hasRemoteStream ? 'opacity-100' : 'opacity-0'}`}
                     onClick={requestPointerLock}
                     onLoadedData={() => {
+                      logVideoDebug('jsx-video-onLoadedData')
                       if (lastRemoteStreamRef.current) {
                         setHasRemoteStream(true)
                         setIsAwaitingFirstFrame(false)
                       }
                     }}
                     onCanPlay={() => {
+                      logVideoDebug('jsx-video-onCanPlay')
                       if (lastRemoteStreamRef.current) {
                         setHasRemoteStream(true)
                         setIsAwaitingFirstFrame(false)
                       }
+                    }}
+                    onPlaying={() => {
+                      logVideoDebug('jsx-video-onPlaying')
+                      if (lastRemoteStreamRef.current) {
+                        setHasRemoteStream(true)
+                        setIsAwaitingFirstFrame(false)
+                      }
+                    }}
+                    onWaiting={() => logVideoDebug('jsx-video-onWaiting')}
+                    onStalled={() => logVideoDebug('jsx-video-onStalled')}
+                    onSuspend={() => logVideoDebug('jsx-video-onSuspend')}
+                    onError={(e) => {
+                      const err = e?.target?.error
+                      logVideoDebug('jsx-video-onError', {
+                        code: err?.code,
+                        message: err?.message,
+                      })
                     }}
                   />
                   {isAwaitingFirstFrame ? (
@@ -1336,18 +1730,6 @@ export default function ClientPage() {
                     End Session
                   </button>
                 </div>
-              </div>
-
-              <div className={`rounded-lg border p-2.5 text-sm ${isDark ? 'border-slate-600 bg-[#202531] text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}>
-                <p>{effectiveSessionStatus}</p>
-                <p className={`mt-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                  {isPointerLocked
-                    ? 'Control mode active (Esc to unlock).'
-                    : canControlSession
-                      ? 'Approved. Click video or use Enter Control to start input.'
-                      : 'Waiting for host approval before entering live control.'}
-                </p>
-                <p className={`mt-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Last input: {toText(lastInputEvent)}</p>
               </div>
 
               {showDiagnostics ? (

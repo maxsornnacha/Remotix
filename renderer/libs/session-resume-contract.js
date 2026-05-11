@@ -4,9 +4,10 @@ const toText = (value) => {
 }
 
 const isProduction = process.env.NODE_ENV === 'production'
+/** Must be a path on `NEXT_PUBLIC_API_URL` (axios baseURL). Next `output: export` cannot host Pages API routes. */
 export const RESUME_PREFLIGHT_ENDPOINT =
   toText(process.env.NEXT_PUBLIC_RESUME_PREFLIGHT_ENDPOINT) ||
-  '/api/sessions/resume/preflight'
+  '/sessions/resume/preflight'
 export const RESUME_PREFLIGHT_MODE = (
   toText(process.env.NEXT_PUBLIC_RESUME_PREFLIGHT_MODE) || (isProduction ? 'strict' : 'allow_unavailable')
 ).toLowerCase()
