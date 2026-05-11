@@ -47,6 +47,17 @@ const toText = (value) => {
   if (typeof value === 'string' || typeof value === 'number') return String(value)
   return ''
 }
+
+/** Next.js `router.query` values may be `string | string[]`. */
+const firstQueryString = (value) => {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return String(value)
+  if (Array.isArray(value) && value.length) {
+    const first = value[0]
+    if (typeof first === 'string' || typeof first === 'number') return String(first)
+  }
+  return ''
+}
 function ThemeGlyph({ isDark }) {
   if (isDark) {
     return (
@@ -509,14 +520,23 @@ export default function ClientPage() {
         setStatus('Stream received. Waiting for first video frames...', 'info')
       })
 
-      if (hostMetaRef.current?.hostDeviceId && deviceId) {
-        api.post('/pairings/save', {
-          ownerDeviceId: deviceId,
-          ownerLabel: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
-          peerDeviceId: hostMetaRef.current.hostDeviceId,
-          peerLabel: hostMetaRef.current.hostDisplayName || 'Host Device',
-          roomId: approvedRoomId || roomId,
-        }).catch(() => {})
+      const ownerDeviceId = firstQueryString(deviceId).trim()
+      const peerDeviceId =
+        toText(hostMetaRef.current?.hostDeviceId).trim() ||
+        firstQueryString(targetHostDeviceId).trim()
+      const activeRoom = firstQueryString(approvedRoomId).trim() || firstQueryString(roomId).trim()
+      if (peerDeviceId && ownerDeviceId && activeRoom) {
+        api
+          .post('/pairings/save', {
+            ownerDeviceId,
+            ownerLabel: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
+            peerDeviceId,
+            peerLabel: hostMetaRef.current?.hostDisplayName || 'Host Device',
+            roomId: activeRoom,
+          })
+          .catch((err) => {
+            console.warn('[client][pairings] save failed', err?.message || err)
+          })
       }
     })
 
@@ -632,6 +652,17 @@ export default function ClientPage() {
       if (isPreapproved) {
         setApprovedRoomId(roomId)
         setStatus('Joining approved session...')
+        const th = firstQueryString(targetHostDeviceId).trim()
+        if (th) {
+          const meta = {
+            exists: true,
+            hostDeviceId: th,
+            hostDisplayName: '',
+            roomId: firstQueryString(roomId),
+          }
+          hostMetaRef.current = meta
+          setHostMeta(meta)
+        }
         joinClientRoom(roomId)
         return
       }
@@ -649,8 +680,11 @@ export default function ClientPage() {
         'request-connection',
         {
           roomId,
-          targetHostDeviceId: typeof targetHostDeviceId === 'string' ? targetHostDeviceId : hostMetaRef.current?.hostDeviceId || '',
-          clientDeviceId: deviceId || '',
+          targetHostDeviceId:
+            firstQueryString(targetHostDeviceId).trim() ||
+            toText(hostMetaRef.current?.hostDeviceId).trim() ||
+            '',
+          clientDeviceId: firstQueryString(deviceId),
           clientDisplayName: typeof name === 'string' ? decodeURIComponent(name) : 'Client Device',
         },
         (response) => {

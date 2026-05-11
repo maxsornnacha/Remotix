@@ -41,14 +41,6 @@ function ThemeGlyph({ isDark }) {
     </svg>
   )
 }
-function PanelGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M12 8v8M8 12h8" />
-    </svg>
-  )
-}
 function CloseGlyph() {
   return (
     <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -56,12 +48,16 @@ function CloseGlyph() {
     </svg>
   )
 }
+function SettingsGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .69.28 1.31.73 1.77.46.46 1.08.73 1.77.73H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  )
+}
 function CircleLoader({ className = '' }) {
   return <span className={`inline-block h-4 w-4 rounded-full border-2 border-current border-t-transparent animate-spin ${className}`} aria-hidden="true" />
-}
-const toStringList = (value) => {
-  if (!Array.isArray(value)) return []
-  return value.map((item) => toText(item)).filter(Boolean)
 }
 const formatRemainingTime = (remainingMs) => {
   const safe = Math.max(0, Number(remainingMs) || 0)
@@ -94,18 +90,16 @@ export default function HomePage() {
   const [isCheckingRoom, setIsCheckingRoom] = useState(false)
   const [feedback, setFeedback] = useState('')
   const [hasAcceptedPolicy, setHasAcceptedPolicy] = useState(false)
-  const [recentRooms, setRecentRooms] = useState([])
   const [deviceId, setDeviceId] = useState('')
   const [deviceName, setDeviceName] = useState('')
   const [pairings, setPairings] = useState([])
   const [isLoadingPairings, setIsLoadingPairings] = useState(false)
   const [isServiceLocked, setIsServiceLocked] = useState(false)
-  const [activeSection, setActiveSection] = useState('news')
-  const [isSessionDrawerOpen, setIsSessionDrawerOpen] = useState(false)
   const [incomingRequest, setIncomingRequest] = useState(null)
   const [isRespondingRequest, setIsRespondingRequest] = useState(false)
   const [pendingOutboundAddress, setPendingOutboundAddress] = useState('')
   const [isPolicyModalOpen, setIsPolicyModalOpen] = useState(false)
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
   const [isPolicyConsentPromptOpen, setIsPolicyConsentPromptOpen] = useState(false)
   const [isRegeneratingDeviceId, setIsRegeneratingDeviceId] = useState(false)
   const [permissionGate, setPermissionGate] = useState({
@@ -131,12 +125,6 @@ export default function HomePage() {
   const { isDark, toggleTheme } = useTheme()
   const { pushAlert } = useAlerts()
   const resumeTone = getResumeTone(resumeRemainingMs)
-  const resumeToneClass = resumeTone === 'critical'
-    ? (isDark ? 'bg-red-500/20 text-red-200 border-red-400/40' : 'bg-red-100 text-red-700 border-red-300')
-    : resumeTone === 'warning'
-      ? (isDark ? 'bg-amber-500/20 text-amber-200 border-amber-400/40' : 'bg-amber-100 text-amber-700 border-amber-300')
-      : (isDark ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40' : 'bg-emerald-100 text-emerald-700 border-emerald-300')
-  const resumeToneAnimationClass = resumeTone === 'critical' ? 'animate-pulse' : ''
   const resumeToneLabel = resumeTone === 'critical'
     ? 'Rejoin expiring soon'
     : resumeTone === 'warning'
@@ -241,7 +229,6 @@ export default function HomePage() {
   useEffect(() => {
     if (typeof window === 'undefined') return
     const policyConsent = window.localStorage.getItem('remotix-policy-consent')
-    const savedRecentRooms = window.localStorage.getItem('remotix-recent-rooms')
     const profile = getOrCreateDeviceProfile()
     setDeviceId(toText(profile.deviceId))
     setDeviceName(toText(profile.displayName))
@@ -250,13 +237,6 @@ export default function HomePage() {
     setResumeToken(token)
     setResumeRemainingMs(Math.max(0, Number(token?.expiresAt || 0) - Date.now()))
 
-    if (!savedRecentRooms) return
-    try {
-      const parsed = JSON.parse(savedRecentRooms)
-      setRecentRooms(toStringList(parsed))
-    } catch (error) {
-      setRecentRooms([])
-    }
   }, [])
 
   useEffect(() => {
@@ -436,7 +416,6 @@ export default function HomePage() {
       const fallbackDeviceId = toText(getOrCreateDeviceProfile()?.deviceId)
       const safeDeviceId = toText(deviceId) || fallbackDeviceId
       if (!approvedRoomId || !safeDeviceId) return
-      rememberRoom(hostDeviceId)
       resetOutboundRequestState()
       const encodedName = encodeURIComponent(deviceName || 'Client Device')
       router.push(`/client/${approvedRoomId}?deviceId=${safeDeviceId}&name=${encodedName}&targetHostDeviceId=${hostDeviceId}&preapproved=1`)
@@ -465,21 +444,6 @@ export default function HomePage() {
       clearOutboundRequestTimeout()
     }
   }, [])
-
-  const persistRecentRooms = (nextRooms) => {
-    const normalized = toStringList(nextRooms).slice(0, 5)
-    setRecentRooms(normalized)
-    window.localStorage.setItem('remotix-recent-rooms', JSON.stringify(normalized))
-  }
-
-  const rememberRoom = (id) => {
-    if (typeof window === 'undefined') return
-    const normalizedId = toText(id).trim()
-    if (!normalizedId) return
-    const safeRecentRooms = toStringList(recentRooms)
-    const nextRooms = [normalizedId, ...safeRecentRooms.filter((item) => item !== normalizedId)].slice(0, 5)
-    persistRecentRooms(nextRooms)
-  }
 
   const ensurePolicyAccepted = () => {
     if (hasAcceptedPolicy) return true
@@ -675,17 +639,13 @@ export default function HomePage() {
     sessionAddressInputRef.current?.focus?.()
   }
 
-  const clearRecentRooms = () => {
-    if (typeof window === 'undefined') return
-    persistRecentRooms([])
-  }
-
   const saveProfile = () => {
     if (!deviceId) return
     const cleanName = deviceName.trim() || 'My Device'
     setDeviceName(cleanName)
     saveDeviceProfile({ deviceId, displayName: cleanName })
     setFeedbackWithAlert('Device profile updated.', 'success')
+    setIsSettingsModalOpen(false)
   }
 
   const regenerateDeviceId = async () => {
@@ -707,7 +667,6 @@ export default function HomePage() {
       setDeviceId(nextDeviceId)
       setDeviceName(toText(nextProfile.displayName))
       setPairings([])
-      setRecentRooms([])
       if (typeof window !== 'undefined') {
         window.localStorage.removeItem('remotix-recent-rooms')
       }
@@ -807,7 +766,6 @@ export default function HomePage() {
       disabled: true,
     },
   ]
-  const sectionItems = ['news', 'trusted', 'recent'].map((item) => toText(item)).filter(Boolean)
 
   const tileToneClass = (tone) => {
     if (tone === 'orange') return 'from-rose-500 to-pink-400'
@@ -821,335 +779,249 @@ export default function HomePage() {
       <div className={`pointer-events-none absolute -top-20 -left-20 h-72 w-72 rounded-full blur-3xl ${isDark ? 'bg-blue-500/15' : 'bg-blue-300/40'}`} />
       <div className={`pointer-events-none absolute -bottom-24 -right-20 h-80 w-80 rounded-full blur-3xl ${isDark ? 'bg-emerald-500/10' : 'bg-emerald-300/30'}`} />
       <div className={`relative z-10 w-full h-full overflow-hidden grid grid-rows-[auto_auto_minmax(0,1fr)] ${isDark ? 'bg-[#121a2c]/95' : 'bg-white/95'}`}>
-        <header className={`px-6 py-4 border-b flex items-center justify-between ${isDark ? 'border-slate-800 bg-[#0f172a]/90' : 'border-slate-200 bg-slate-50/90'}`}>
-          <div className="flex items-center gap-2">
-            <h1 className={`text-xl md:text-2xl font-bold tracking-tight ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>Remotix</h1>
-            <span className={`text-[11px] px-2 py-0.5 rounded-full border ${isDark ? 'border-slate-600 text-slate-300' : 'border-slate-300 text-slate-600'}`}>
-              Desktop
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className={`text-xs px-3 py-1.5 rounded-md border ${isDark ? 'border-slate-600 bg-slate-800 text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}
-              title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-            >
-              <ThemeGlyph isDark={isDark} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsSessionDrawerOpen(true)}
-              className={`text-xs px-3 py-1.5 rounded-md border ${isDark ? 'border-slate-600 bg-slate-800 text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}
-              title="Open session controls"
-            >
-              <PanelGlyph />
-            </button>
-            {isServiceLocked ? (
-              <span className={`text-xs px-2.5 py-1 rounded-full border ${isDark ? 'bg-red-700/40 text-red-300 border-red-500/40' : 'bg-red-100 text-red-700 border-red-300'}`}>
-                Service Unavailable
-              </span>
-            ) : null}
-          </div>
-        </header>
-
-        <div className={`px-6 py-3 border-b grid grid-cols-[auto_1fr_auto] items-center gap-4 ${isDark ? 'border-slate-800 bg-[#0f172a]/70' : 'border-slate-200 bg-slate-50/80'}`}>
-          <span className={`text-xs uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Your Address</span>
-          <div className="flex items-center gap-3 min-w-0">
-            <p className={`font-mono text-xl md:text-2xl truncate ${isDark ? 'text-red-300' : 'text-red-600'}`}>{toText(deviceId) || 'Loading...'}</p>
-            <button
-              type="button"
-              onClick={copyDeviceId}
-              className={`text-xs px-2.5 py-1 rounded border ${isDark ? 'border-slate-600 bg-slate-800' : 'border-slate-300 bg-white'}`}
-            >
-              Copy
-            </button>
-            <button
-              type="button"
-              onClick={regenerateDeviceId}
-              disabled={isCheckingRoom || isRegeneratingDeviceId}
-              className={`text-xs px-2.5 py-1 rounded border ${
-                isDark
-                  ? 'border-slate-500 bg-slate-700 hover:bg-slate-600 text-slate-100'
-                  : 'border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700'
-              } disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2`}
-            >
-              {isRegeneratingDeviceId ? (
-                <>
-                  <CircleLoader className="h-3.5 w-3.5" />
-                  Regenerating...
-                </>
-              ) : 'Regenerate'}
-            </button>
-          </div>
-          <div className="flex gap-2">
-            {sectionItems.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setActiveSection(item)}
-                className={`text-xs px-2 py-1 rounded-md border ${
-                  activeSection === item
-                    ? 'bg-blue-600 text-white border-blue-500'
-                    : isDark
-                      ? 'border-slate-600 text-slate-300'
-                      : 'border-slate-300 text-slate-600'
-                }`}
-              >
-                {item === 'news' ? 'News' : item === 'trusted' ? 'Trusted' : 'Recent'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <main className="min-h-0 overflow-hidden px-6 py-5">
-          <section className="min-h-0 overflow-y-auto pr-1 space-y-4">
-            {activeSection === 'news' ? (
-              <div className="grid md:grid-cols-3 gap-4">
-                {newsTiles.map((tile) => (
-                  <div key={tile.title} className={`rounded-xl p-4 text-white bg-gradient-to-br ${tileToneClass(tile.tone)}`}>
-                    <p className="font-semibold text-sm">{toText(tile.title)}</p>
-                    <p className="text-xs mt-2 opacity-90 min-h-[50px]">{toText(tile.body)}</p>
-                    <button
-                      type="button"
-                      onClick={tile.onClick}
-                      disabled={tile.disabled || isServiceLocked}
-                      className="mt-3 text-xs font-semibold underline underline-offset-2 disabled:opacity-60"
-                    >
-                      {toText(tile.action)}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {activeSection === 'trusted' ? (
-              <div className={`rounded-2xl border p-4 ${isDark ? 'border-slate-700 bg-[#18233b]' : 'border-slate-200 bg-slate-50'}`}>
-                <h3 className={`text-sm font-semibold mb-3 ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>Trusted Devices</h3>
-                {isLoadingPairings ? (
-                  <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Loading paired devices...</p>
-                ) : pairings.length === 0 ? (
-                  <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>No paired devices yet. Connect once to create pairing.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {pairings.map((item) => (
-                      <div
-                        key={`${item.ownerDeviceId}-${item.peerDeviceId}`}
-                        className={`rounded-md border px-3 py-2 flex items-center justify-between ${isDark ? 'border-slate-600 bg-[#0f172a]' : 'border-slate-300 bg-white'}`}
-                      >
-                        <div>
-                          <p className="text-sm">{toText(item.peerLabel) || toText(item.peerDeviceId)}</p>
-                          <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{toText(item.peerDeviceId)}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => connectToPairedDevice(item.peerDeviceId)}
-                          disabled={isServiceLocked || isCheckingRoom}
-                          className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-                        >
-                          {isCheckingRoom && pendingOutboundAddress === toText(item.peerDeviceId).trim() ? (
-                            <>
-                              <CircleLoader className="h-3.5 w-3.5" />
-                              Requesting...
-                            </>
-                          ) : 'Connect'}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : null}
-
-            {activeSection === 'recent' ? (
-              <div className={`rounded-2xl border p-4 ${isDark ? 'border-slate-700 bg-[#18233b]' : 'border-slate-200 bg-slate-50'}`}>
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className={`text-sm font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>Recent Sessions</h3>
-                  <button
-                    type="button"
-                    onClick={clearRecentRooms}
-                    className={`text-xs ${isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
-                  >
-                    Clear
-                  </button>
-                </div>
-                {recentRooms.length === 0 ? (
-                  <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>No recent rooms yet.</p>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {recentRooms.map((recentRoom) => (
-                      <button
-                        key={recentRoom}
-                        type="button"
-                        onClick={() => setRoomId(toText(recentRoom))}
-                        className={`px-3 py-1 text-xs rounded-md border ${isDark ? 'border-slate-600 bg-[#0f172a] hover:bg-slate-700' : 'border-slate-300 bg-white hover:bg-slate-100'}`}
-                      >
-                        {toText(recentRoom)}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </section>
-
-        </main>
-      </div>
-
-      <div className={`fixed inset-0 z-20 transition-opacity duration-300 ${isSessionDrawerOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
-        <button
-          type="button"
-          onClick={() => setIsSessionDrawerOpen(false)}
-          className="absolute inset-0 bg-black/45"
-          aria-label="Close session drawer overlay"
-        />
-        <aside
-          className={`absolute right-0 top-0 h-full w-full max-w-md border-l shadow-2xl p-5 overflow-y-auto transition-transform duration-300 ease-out ${isSessionDrawerOpen ? 'translate-x-0' : 'translate-x-full'} ${isDark ? 'border-slate-700 bg-[#101a2f]' : 'border-slate-300 bg-white'}`}
-          onClick={(e) => e.stopPropagation()}
+        <header
+          className={`px-3 sm:px-5 py-2 border-b ${isDark ? 'border-slate-800 bg-[#0f172a]/90' : 'border-slate-200 bg-slate-50/90'}`}
         >
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-base font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>Session Control</h3>
-              <button
-                type="button"
-                onClick={() => setIsSessionDrawerOpen(false)}
-                className={`p-2 rounded-md border ${isDark ? 'border-slate-600 text-slate-200' : 'border-slate-300 text-slate-700'}`}
-              >
-                <CloseGlyph />
-              </button>
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-2">
+            <div className="flex items-center gap-2 shrink-0">
+              <h1 className={`text-lg sm:text-xl md:text-2xl font-bold tracking-tight ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>
+                Remotix
+              </h1>
+              <span className={`text-[10px] sm:text-[11px] px-1.5 sm:px-2 py-0.5 rounded-full border ${isDark ? 'border-slate-600 text-slate-300' : 'border-slate-300 text-slate-600'}`}>
+                Desktop
+              </span>
             </div>
 
-            <div className="space-y-2">
+            <div
+              className={`flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5 rounded-lg px-1.5 py-1 sm:px-2 ${
+                isDark ? 'bg-slate-900/50 border border-slate-700/80' : 'bg-white/80 border border-slate-200'
+              }`}
+              title="Connect to a remote address. Host must approve before the session opens."
+            >
               <input
                 ref={sessionAddressInputRef}
                 type="text"
                 value={roomId}
                 onChange={(e) => setRoomId(toText(e.target.value))}
-                placeholder="Enter remote device address"
+                placeholder="Remote address"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') joinRoom()
                 }}
-                className={`w-full px-4 py-2 rounded-md border focus:ring-2 focus:ring-blue-500 focus:outline-none ${isDark ? 'bg-[#0f172a] text-white border-slate-600' : 'bg-white text-slate-900 border-slate-300'}`}
+                className={`min-w-28 flex-1 text-xs py-1.5 px-2 rounded border focus:ring-1 focus:ring-blue-500 focus:outline-none ${
+                  isDark ? 'bg-[#0f172a] text-white border-slate-600' : 'bg-white text-slate-900 border-slate-300'
+                }`}
               />
-              <div className="grid grid-cols-1 gap-2">
-                <button
-                  onClick={joinRoom}
-                  disabled={isCheckingRoom || isServiceLocked}
-                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2 rounded-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
-                >
-                  {isCheckingRoom ? (
-                    <>
-                      <CircleLoader />
-                      Requesting...
-                    </>
-                  ) : 'Connect'}
-                </button>
-                {resumeToken || showResumeExpiredHint ? (
-                  <div className="space-y-1">
-                    <button
-                      type="button"
-                      onClick={resumeToken ? rejoinLastSession : createNewSession}
-                      disabled={isCheckingRoom || isServiceLocked || isValidatingResume}
-                      className={`w-full font-semibold py-2 rounded-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
-                        resumeToken
-                          ? 'bg-indigo-600 hover:bg-indigo-500 text-white'
-                          : 'bg-slate-600 hover:bg-slate-500 text-white'
-                      }`}
+              <button
+                type="button"
+                onClick={joinRoom}
+                disabled={isCheckingRoom || isServiceLocked}
+                className="shrink-0 rounded-md bg-emerald-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60 inline-flex items-center gap-1.5"
+              >
+                {isCheckingRoom ? (
+                  <>
+                    <CircleLoader className="h-3 w-3" />
+                  </>
+                ) : (
+                  'Connect'
+                )}
+              </button>
+              {resumeToken || showResumeExpiredHint ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={resumeToken ? rejoinLastSession : createNewSession}
+                    disabled={isCheckingRoom || isServiceLocked || isValidatingResume}
+                    title={
+                      resumeToken
+                        ? `Rejoin last session. Expires in ${formatRemainingTime(resumeRemainingMs)}. Preflight: ${RESUME_PREFLIGHT_MODE}${
+                            lastResumeBypassReason ? `. ${lastResumeBypassReason}` : ''
+                          }`
+                        : 'Start a new session token'
+                    }
+                    className={`shrink-0 rounded-md px-2 py-1.5 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
+                      resumeToken
+                        ? 'bg-indigo-600 text-white hover:bg-indigo-500'
+                        : 'bg-slate-600 text-white hover:bg-slate-500'
+                    }`}
+                  >
+                    {resumeToken ? (isValidatingResume ? '…' : 'Rejoin') : 'New'}
+                  </button>
+                  {resumeToken ? (
+                    <span
+                      className={`hidden sm:inline text-[10px] tabular-nums opacity-80 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}
+                      title={`${resumeToneLabel} · ${RESUME_PREFLIGHT_MODE}`}
                     >
-                      {resumeToken ? (isValidatingResume ? 'Validating Resume...' : 'Rejoin Last Session') : 'Create New Session'}
-                    </button>
-                    {resumeToken ? (
-                      <p className={`text-[11px] text-center ${isDark ? 'text-indigo-300' : 'text-indigo-700'}`}>
-                        Expires in {formatRemainingTime(resumeRemainingMs)}
-                      </p>
-                    ) : (
-                      <p className={`text-[11px] text-center transition-opacity duration-500 ${isDark ? 'text-slate-300' : 'text-slate-600'} opacity-80`}>
-                        Last rejoin session has expired.
-                      </p>
-                    )}
-                    <div className="flex justify-center">
-                      {resumeToken ? (
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full border ${resumeToneClass} ${resumeToneAnimationClass}`}>
-                          {resumeToneLabel}
-                        </span>
-                      ) : (
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full border transition-opacity duration-500 ${isDark ? 'bg-slate-600/30 text-slate-300 border-slate-500/40' : 'bg-slate-100 text-slate-600 border-slate-300'} opacity-80`}>
-                          Expired
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex justify-center">
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded-full border ${
-                          RESUME_PREFLIGHT_MODE === 'allow_unavailable'
-                            ? (isDark
-                                ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
-                                : 'bg-amber-100 text-amber-700 border-amber-300')
-                            : (isDark
-                                ? 'bg-slate-600/30 text-slate-300 border-slate-500/40'
-                                : 'bg-slate-100 text-slate-600 border-slate-300')
-                        }`}
-                      >
-                        Preflight Mode: {RESUME_PREFLIGHT_MODE}
-                      </span>
-                    </div>
-                    {lastResumeBypassReason ? (
-                      <p className={`text-[10px] text-center ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
-                        {lastResumeBypassReason}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-              <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                Host must allow your request before both devices enter the detail session.
-              </p>
-            </div>
+                      {formatRemainingTime(resumeRemainingMs)}
+                    </span>
+                  ) : null}
+                </>
+              ) : null}
 
-            <div className="space-y-2 mt-5">
-              <label className={`text-xs ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Device Name</label>
-              <div className="grid grid-cols-[1fr_auto] gap-2">
-                <input
-                  type="text"
-                  value={deviceName}
-                  onChange={(e) => setDeviceName(e.target.value)}
-                  placeholder="Device name"
-                  className={`px-4 py-2 rounded-md border focus:ring-2 focus:ring-blue-500 focus:outline-none ${isDark ? 'bg-[#0f172a] text-white border-slate-600' : 'bg-white text-slate-900 border-slate-300'}`}
-                />
-                <button
-                  type="button"
-                  onClick={saveProfile}
-                  className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm"
-                >
-                  Save
-                </button>
-              </div>
-            </div>
-
-            <label className={`flex items-start gap-3 text-sm mt-5 ${isDark ? 'text-gray-300' : 'text-slate-700'}`}>
-              <input
-                type="checkbox"
-                checked={hasAcceptedPolicy}
-                onChange={(e) => {
-                  const checked = e.target.checked
-                  setHasAcceptedPolicy(checked)
-                  window.localStorage.setItem('remotix-policy-consent', checked ? 'accepted' : 'rejected')
-                }}
-                className="mt-1 h-4 w-4 rounded border-gray-500 bg-[#2a2a2a]"
+              <span
+                className={`hidden md:block h-5 w-px shrink-0 ${isDark ? 'bg-slate-600' : 'bg-slate-300'}`}
+                aria-hidden="true"
               />
-              <span>
-                I accept the{' '}
-                <button
-                  type="button"
-                  onClick={() => setIsPolicyModalOpen(true)}
-                  className="text-blue-400 underline underline-offset-2"
-                >
-                  Remote Access Policy
-                </button>
-                .
-              </span>
-            </label>
 
-        </aside>
+              <label
+                className={`flex shrink-0 cursor-pointer items-center gap-1 text-[10px] sm:text-[11px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}
+                title="Accept the Remote Access Policy before connecting"
+              >
+                <input
+                  type="checkbox"
+                  checked={hasAcceptedPolicy}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setHasAcceptedPolicy(checked)
+                    window.localStorage.setItem('remotix-policy-consent', checked ? 'accepted' : 'rejected')
+                  }}
+                  className={`h-3.5 w-3.5 shrink-0 rounded border ${isDark ? 'border-slate-500 bg-[#0f172a]' : 'border-slate-400 bg-white'}`}
+                />
+                <span className="select-none whitespace-nowrap">Accept</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => setIsPolicyModalOpen(true)}
+                className={`shrink-0 px-0.5 text-[10px] sm:text-[11px] underline underline-offset-2 ${isDark ? 'text-blue-300' : 'text-blue-600'}`}
+              >
+                Policy
+              </button>
+
+              <span
+                className={`hidden sm:block h-5 w-px shrink-0 ${isDark ? 'bg-slate-600' : 'bg-slate-300'}`}
+                aria-hidden="true"
+              />
+              <button
+                type="button"
+                onClick={() => setIsSettingsModalOpen(true)}
+                className={`shrink-0 rounded-md border px-2.5 py-1.5 text-xs ${isDark ? 'border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
+                title="Settings"
+                aria-haspopup="dialog"
+                aria-expanded={isSettingsModalOpen}
+              >
+                <SettingsGlyph />
+              </button>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                className={`shrink-0 rounded-md border px-2.5 py-1.5 text-xs ${isDark ? 'border-slate-600 bg-slate-800 text-slate-200' : 'border-slate-300 bg-white text-slate-700'}`}
+                title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                <ThemeGlyph isDark={isDark} />
+              </button>
+              {isServiceLocked ? (
+                <span className={`shrink-0 rounded-full border px-2 py-1 text-[10px] sm:text-xs ${isDark ? 'bg-red-700/40 text-red-300 border-red-500/40' : 'bg-red-100 text-red-700 border-red-300'}`}>
+                  Locked
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </header>
+
+        <div
+          className={`px-6 py-3 border-b ${isDark ? 'border-slate-800 bg-[#0f172a]/70' : 'border-slate-200 bg-slate-50/80'}`}
+        >
+          <div className="flex min-w-0 w-full flex-wrap items-center gap-x-3 gap-y-2">
+            <span className={`text-xs uppercase tracking-wider shrink-0 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+              Your Address
+            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={copyDeviceId}
+                className={`text-xs px-2.5 py-1 rounded border ${isDark ? 'border-slate-600 bg-slate-800' : 'border-slate-300 bg-white'}`}
+              >
+                Copy
+              </button>
+              <button
+                type="button"
+                onClick={regenerateDeviceId}
+                disabled={isCheckingRoom || isRegeneratingDeviceId}
+                className={`text-xs px-2.5 py-1 rounded border ${
+                  isDark
+                    ? 'border-slate-500 bg-slate-700 hover:bg-slate-600 text-slate-100'
+                    : 'border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700'
+                } disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2`}
+              >
+                {isRegeneratingDeviceId ? (
+                  <>
+                    <CircleLoader className="h-3.5 w-3.5" />
+                    Regenerating...
+                  </>
+                ) : (
+                  'Regenerate'
+                )}
+              </button>
+            </div>
+            <p
+              className={`min-w-0 max-w-full flex-1 basis-0 font-mono text-lg sm:text-xl md:text-2xl truncate ${isDark ? 'text-red-300' : 'text-red-600'}`}
+            >
+              {toText(deviceId) || 'Loading...'}
+            </p>
+          </div>
+        </div>
+
+        <main className="min-h-0 overflow-y-auto px-6 py-5">
+          <section className="space-y-6 pr-1">
+            <div className="grid md:grid-cols-3 gap-4">
+              {newsTiles.map((tile) => (
+                <div key={tile.title} className={`rounded-xl p-4 text-white bg-gradient-to-br ${tileToneClass(tile.tone)}`}>
+                  <p className="font-semibold text-sm">{toText(tile.title)}</p>
+                  <p className="text-xs mt-2 opacity-90 min-h-[50px]">{toText(tile.body)}</p>
+                  <button
+                    type="button"
+                    onClick={tile.onClick}
+                    disabled={tile.disabled || isServiceLocked}
+                    className="mt-3 text-xs font-semibold underline underline-offset-2 disabled:opacity-60"
+                  >
+                    {toText(tile.action)}
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className={`rounded-2xl border p-4 ${isDark ? 'border-slate-700 bg-[#18233b]' : 'border-slate-200 bg-slate-50'}`}>
+              <h3 className={`text-sm font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>Trusted Devices</h3>
+              <p className={`mt-1 mb-3 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Devices you have connected to before. Use Connect to request again without typing the address.
+              </p>
+              {isLoadingPairings ? (
+                <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Loading paired devices...</p>
+              ) : pairings.length === 0 ? (
+                <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>No paired devices yet. Complete a session once to save a pairing here.</p>
+              ) : (
+                <div className="space-y-2">
+                  {pairings.map((item) => (
+                    <div
+                      key={`${item.ownerDeviceId}-${item.peerDeviceId}`}
+                      className={`rounded-md border px-3 py-2 flex items-center justify-between ${isDark ? 'border-slate-600 bg-[#0f172a]' : 'border-slate-300 bg-white'}`}
+                    >
+                      <div>
+                        <p className="text-sm">{toText(item.peerLabel) || toText(item.peerDeviceId)}</p>
+                        <p className={`text-xs font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{toText(item.peerDeviceId)}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => connectToPairedDevice(item.peerDeviceId)}
+                        disabled={isServiceLocked || isCheckingRoom}
+                        className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                      >
+                        {isCheckingRoom && pendingOutboundAddress === toText(item.peerDeviceId).trim() ? (
+                          <>
+                            <CircleLoader className="h-3.5 w-3.5" />
+                            Requesting...
+                          </>
+                        ) : (
+                          'Connect'
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+
+        </main>
       </div>
 
       {!permissionGate.allGranted ? (
@@ -1255,6 +1127,89 @@ export default function HomePage() {
                 className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isSettingsModalOpen ? (
+        <div
+          className="absolute inset-0 z-[32] flex items-center justify-center bg-black/55 p-4 animate-[modalBackdropIn_220ms_ease-out]"
+          onClick={() => setIsSettingsModalOpen(false)}
+          role="presentation"
+        >
+          <div
+            className={`w-full max-w-md rounded-xl border p-5 shadow-2xl animate-[modalPanelIn_260ms_cubic-bezier(0.2,0.8,0.2,1)] ${isDark ? 'border-slate-600 bg-[#101a2f]' : 'border-slate-300 bg-white'}`}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-modal-title"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h3 id="settings-modal-title" className={`text-lg font-semibold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>
+                Settings
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsSettingsModalOpen(false)}
+                className={`p-2 rounded-md border ${isDark ? 'border-slate-600 text-slate-200' : 'border-slate-300 text-slate-700'}`}
+                aria-label="Close settings"
+              >
+                <CloseGlyph />
+              </button>
+            </div>
+            <p className={`mt-2 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+              Device address (read-only)
+            </p>
+            <p className={`mt-1 font-mono text-xs break-all ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{toText(deviceId) || '—'}</p>
+
+            <label className={`mt-5 block text-xs font-medium ${isDark ? 'text-slate-300' : 'text-slate-700'}`} htmlFor="settings-device-name">
+              Display name
+            </label>
+            <p className={`mt-1 text-[11px] ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+              Shown to others when you connect or host a session.
+            </p>
+            <input
+              id="settings-device-name"
+              type="text"
+              value={deviceName}
+              onChange={(e) => setDeviceName(e.target.value)}
+              placeholder="My device"
+              className={`mt-2 w-full rounded-md border px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${
+                isDark ? 'border-slate-600 bg-[#0f172a] text-white' : 'border-slate-300 bg-white text-slate-900'
+              }`}
+            />
+
+            <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsSettingsModalOpen(false)}
+                className={`rounded-md border px-4 py-2 text-sm ${isDark ? 'border-slate-600 text-slate-200 hover:bg-slate-800' : 'border-slate-300 text-slate-800 hover:bg-slate-50'}`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveProfile}
+                disabled={!deviceId}
+                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save name
+              </button>
+            </div>
+
+            <div className={`mt-6 border-t pt-4 ${isDark ? 'border-slate-700' : 'border-slate-200'}`}>
+              <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>More</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSettingsModalOpen(false)
+                  setIsPolicyModalOpen(true)
+                }}
+                className={`mt-2 text-sm underline underline-offset-2 ${isDark ? 'text-blue-300' : 'text-blue-600'}`}
+              >
+                Remote Access Policy
               </button>
             </div>
           </div>
