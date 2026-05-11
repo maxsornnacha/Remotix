@@ -1,6 +1,7 @@
 import "../style/global.css";
 import React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/router";
 import { AlertContext } from "../libs/alerts";
 import { api } from "../libs/http";
 import { useTheme } from "../libs/theme";
@@ -118,6 +119,7 @@ function ServiceUnavailablePage({ title, message, onRetry, isChecking, isDark })
 
 function ServiceGuard({ children }) {
   const { isDark } = useTheme();
+  const router = useRouter();
   const [isChecking, setIsChecking] = useState(true);
   const [hasCheckedOnce, setHasCheckedOnce] = useState(false);
   const [isUnavailable, setIsUnavailable] = useState(false);
@@ -125,6 +127,8 @@ function ServiceGuard({ children }) {
     title: "Service unavailable",
     message: "Unable to verify service status.",
   });
+  const isSessionRoute =
+    router.pathname === "/host/[roomId]" || router.pathname === "/client/[roomId]";
 
   const checkServiceHealth = useCallback(
     async ({ foreground = false } = {}) => {
@@ -141,12 +145,18 @@ function ServiceGuard({ children }) {
         });
 
         if (payload?.dbConnected === false) {
-          setIsUnavailable(true);
-          setReason({
-            title: "Cannot connect to database",
-            message:
-              "MongoDB is unavailable. Remote features are temporarily locked.",
-          });
+          if (!isSessionRoute || foreground || !hasCheckedOnce) {
+            setIsUnavailable(true);
+            setReason({
+              title: "Cannot connect to database",
+              message:
+                "MongoDB is unavailable. Remote features are temporarily locked.",
+            });
+          } else {
+            console.warn(
+              "[service-guard] DB reported unavailable during active session; keeping session UI.",
+            );
+          }
           return;
         }
 
@@ -156,27 +166,37 @@ function ServiceGuard({ children }) {
           message: "Unable to verify service status.",
         });
       } catch (error) {
-        setIsUnavailable(true);
         const isTimeout =
           error?.name === "AbortError" || error?.code === "ERR_CANCELED";
         const statusCode = error?.response?.status;
         const serverMessage = error?.response?.data?.message;
-        setReason({
-          title: "Cannot connect to server",
-          message: isTimeout
-            ? "Server health check timed out. Please verify backend service and network."
-            : serverMessage ||
-              (statusCode
-                ? `Status API returned HTTP ${statusCode}.`
-                : "Server is unreachable. Please start API server and try again."),
-        });
+        if (!isSessionRoute || foreground || !hasCheckedOnce) {
+          setIsUnavailable(true);
+          setReason({
+            title: "Cannot connect to server",
+            message: isTimeout
+              ? "Server health check timed out. Please verify backend service and network."
+              : serverMessage ||
+                (statusCode
+                  ? `Status API returned HTTP ${statusCode}.`
+                  : "Server is unreachable. Please start API server and try again."),
+          });
+        } else {
+          console.warn(
+            "[service-guard] Health check failed during active session; keeping session UI.",
+            {
+              isTimeout,
+              statusCode: statusCode || null,
+            },
+          );
+        }
       } finally {
         window.clearTimeout(timeout);
         setIsChecking(false);
         setHasCheckedOnce(true);
       }
     },
-    [hasCheckedOnce],
+    [hasCheckedOnce, isSessionRoute],
   );
 
   useEffect(() => {
@@ -206,7 +226,7 @@ function ServiceGuard({ children }) {
         </div>
       );
     }
-    if (isUnavailable) {
+    if (isUnavailable && !isSessionRoute) {
       return (
         <ServiceUnavailablePage
           title={reason.title}
@@ -224,6 +244,7 @@ function ServiceGuard({ children }) {
     hasCheckedOnce,
     isChecking,
     isUnavailable,
+    isSessionRoute,
     reason.message,
     reason.title,
   ]);

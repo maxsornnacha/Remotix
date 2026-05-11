@@ -1090,21 +1090,6 @@ export default function HostPage() {
   }, [roomId, allowControl, router, knownPairings])
 
   useEffect(() => {
-    const leaveCurrentSession = () => {
-      const activeRoomId = toText(roomId)
-      if (!activeRoomId) return
-      socket.emit('leave-session', {
-        roomId: activeRoomId,
-        message: 'Host left the session.',
-      })
-    }
-    window.addEventListener('beforeunload', leaveCurrentSession)
-    return () => {
-      window.removeEventListener('beforeunload', leaveCurrentSession)
-    }
-  }, [roomId])
-
-  useEffect(() => {
     if (!deviceId) return
     const emitHeartbeat = () => {
       socket.emit('host-heartbeat', {

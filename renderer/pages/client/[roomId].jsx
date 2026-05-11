@@ -798,22 +798,6 @@ export default function ClientPage() {
     };
     }, [roomId, router, deviceId, name, targetHostDeviceId, preapproved]);
 
-  useEffect(() => {
-    const leaveCurrentSession = () => {
-      const activeRoomId = toText(approvedRoomId || joinedRoomRef.current || roomId)
-      if (!activeRoomId) return
-      socket.emit('leave-session', {
-        roomId: activeRoomId,
-        message: 'Client left the session.',
-      })
-    }
-    window.addEventListener('beforeunload', leaveCurrentSession)
-    return () => {
-      window.removeEventListener('beforeunload', leaveCurrentSession)
-    }
-  }, [approvedRoomId, roomId])
-  
-
   // Send remote input events
   useEffect(() => {
     const activeRoomId = () => approvedRoomId || roomId
