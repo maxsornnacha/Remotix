@@ -1,5 +1,35 @@
 import fs from "fs";
-import { Tray, Menu, nativeImage, ipcMain, app, BrowserWindow } from "electron";
+import {
+  Tray,
+  Menu,
+  nativeImage,
+  ipcMain,
+  app,
+  BrowserWindow,
+  Notification,
+} from "electron";
+
+function trayLocationHint() {
+  if (process.platform === "darwin") return "แถบเมนูด้านบน (menu bar)";
+  if (process.platform === "win32") return "ทาสก์บาร์ มุมขวาล่าง (system tray)";
+  return "ถาดระบบ (system tray)";
+}
+
+/** แจ้งครั้งเดียวตอนพับหน้าต่างไป tray — กัน user นึกว่าแอปหาย */
+function notifyHostWindowFoldedToTray() {
+  if (!Notification.isSupported()) return;
+  try {
+    const where = trayLocationHint();
+    const body = `แอป Remotix ยังทำงานอยู่ — หน้าต่างถูกพับไปที่ไอคอนริมจอ (${where}) แล้ว คลิกไอคอนเพื่อเปิดเมนู หรือดับเบิลคลิกเพื่อเปิดหน้าต่าง / The app is still running; click the Remotix tray icon to open the menu or double-click to show the window.`;
+    const n = new Notification({
+      title: "Remotix — โหมดโฮสต์",
+      body,
+    });
+    n.show();
+  } catch (_e) {
+    // ignore (e.g. notifications disabled in system settings)
+  }
+}
 
 /** 1×1 PNG fallback when no app icon file is found (scaled by the OS for tray). */
 const FALLBACK_TRAY_PNG = Buffer.from(
@@ -60,7 +90,16 @@ export function registerHostTraySession(mainWindow, getIconPath) {
     if (!tray) return;
     const template = [
       {
-        label: "Show Remotix",
+        label: "● Remotix — โฮสต์ (หน้าต่างอยู่ใน tray)",
+        enabled: false,
+      },
+      {
+        label: "หาไอคอนริมจอด้านบน/ขวาล่าง",
+        enabled: false,
+      },
+      { type: "separator" },
+      {
+        label: "เปิดหน้าต่าง / Show window",
         click: () => {
           if (mainWindow.isDestroyed()) return;
           mainWindow.show();
@@ -76,7 +115,7 @@ export function registerHostTraySession(mainWindow, getIconPath) {
       },
       { type: "separator" },
       {
-        label: "Quit Remotix",
+        label: "ออกจากโปรแกรม / Quit",
         click: () => {
           state.exiting = true;
           state.traySession = false;
@@ -95,7 +134,9 @@ export function registerHostTraySession(mainWindow, getIconPath) {
     }
     const image = trayImageFromPath(getIconPath);
     tray = new Tray(image);
-    tray.setToolTip("Remotix — host session (menu: Show / Quit)");
+    tray.setToolTip(
+      `Remotix — โฮสต์ทำงานอยู่ (หน้าต่างพับใน tray แล้ว) · ${trayLocationHint()} · คลิก = เมนู · ดับเบิลคลิก = เปิดหน้าต่าง`,
+    );
     rebuildMenu();
     tray.on("double-click", () => {
       if (mainWindow.isDestroyed()) return;
@@ -106,8 +147,12 @@ export function registerHostTraySession(mainWindow, getIconPath) {
 
   const enterTrayMode = () => {
     if (mainWindow.isDestroyed()) return;
+    const alreadyInTraySession = state.traySession;
     state.traySession = true;
     ensureTray();
+    if (!alreadyInTraySession) {
+      notifyHostWindowFoldedToTray();
+    }
     mainWindow.hide();
     if (process.platform === "darwin" && app.dock) {
       try {

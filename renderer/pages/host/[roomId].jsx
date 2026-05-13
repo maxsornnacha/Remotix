@@ -910,11 +910,17 @@ export default function HostPage() {
       console.log('[host][join-room] success', response)
       if (localStreamRef.current) {
         announceHandshakeReady()
+        if (window.ipc?.invoke) {
+          setNotice(
+            'แชร์อยู่แล้ว — เชื่อมห้องสำเร็จ ในแอปเดสก์ท็อปหน้าต่างจะพับไปที่ไอคอนริมจอ (tray) ในไม่ช้า แอปยังทำงานอยู่ คลิกไอคอน Remotix ที่เมนูบาร์หรือทาสก์บาร์เพื่อเปิดกลับ / Sharing already on; the window will move to the tray shortly — the app is still running.',
+            'info',
+          )
+        }
       } else {
         setNotice(
           `Preparing screen share automatically. You can still change source anytime.${
             window.ipc?.invoke
-              ? ' The window will move to the tray when the screen picker is closed and sharing is idle.'
+              ? ' ในแอปเดสก์ท็อป หลังปิดตัวเลือกจอและไม่ busy แล้ว หน้าต่างจะพับไปที่ tray — แอปยังทำงานอยู่ (ดูไอคอน Remotix ริมจอ + การแจ้งเตือนระบบ) / Desktop: window folds to tray when idle; app keeps running.'
               : ''
           }`,
         )
@@ -1362,6 +1368,16 @@ export default function HostPage() {
     }
   }, [isSharing])
 
+  /** ขอสิทธิ์การแจ้งเตือนล่วงหน้า เพื่อให้ main process แจ้งได้เมื่อพับไป tray (บางระบบต้องได้รับอนุญาตจากผู้ใช้) */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.ipc?.invoke) return undefined
+    if (typeof Notification === 'undefined' || typeof Notification.requestPermission !== 'function') {
+      return undefined
+    }
+    void Notification.requestPermission().catch(() => {})
+    return undefined
+  }, [])
+
   /**
    * Electron: after join-room succeeds, hide the main window to the tray as soon as blocking UI is gone
    * (no source picker, not mid capture prep). Stays off while in session; disabled when session ends or leaving.
@@ -1579,6 +1595,19 @@ export default function HostPage() {
             </span>
           </div>
         </div>
+
+        {typeof window !== 'undefined' && window.ipc?.invoke && hostSessionJoined ? (
+          <div
+            className={`mx-4 mt-1 rounded-md border px-3 py-1.5 text-[11px] leading-snug ${
+              isDark ? 'border-cyan-800/60 bg-cyan-950/40 text-cyan-100/95' : 'border-cyan-200 bg-cyan-50 text-cyan-900'
+            }`}
+            role="status"
+          >
+            <span className="font-semibold">โหมดโฮสต์ (แอปเดสก์ท็อป):</span>{' '}
+            หน้าต่างอาจถูก<strong>พับไปที่ไอคอน Remotix ริมจอ (tray)</strong> แอปยังทำงานอยู่ — ดูการแจ้งเตือนของระบบ
+            หรือชี้ที่ไอคอนเพื่ออ่านคำอธิบาย / The window may fold to the <strong>tray</strong>; the app is still running — check the system notification or hover the tray icon.
+          </div>
+        ) : null}
 
         {dbUnavailableMessage ? (
           <div className={`mx-5 mt-3 rounded-lg border px-4 py-3 text-sm ${isDark ? 'border-red-500/40 bg-red-500/10 text-red-200' : 'border-red-300 bg-red-50 text-red-700'}`}>
