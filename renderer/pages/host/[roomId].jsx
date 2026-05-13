@@ -3,7 +3,7 @@ import { useRouter } from 'next/router'
 import Peer from 'simple-peer'
 import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
-import { attachRtcDiagnostics, getRtcConfig } from '../../libs/rtc'
+import { attachRtcDiagnostics, getRtcConfig, runWebRtcLatencyWarmup } from '../../libs/rtc'
 import { api } from '../../libs/http'
 import {
   clearSessionResumeToken,
@@ -588,7 +588,8 @@ export default function HostPage() {
     if (!track || typeof track.applyConstraints !== 'function') return
 
     const profileMap = {
-      good: { width: 1920, height: 1080, frameRate: 30 },
+      // Slightly below 1080p30 default: less encode + network backlog while still sharp for remote desktop.
+      good: { width: 1600, height: 900, frameRate: 28 },
       fair: { width: 1280, height: 720, frameRate: 24 },
       poor: { width: 960, height: 540, frameRate: 15 },
     }
@@ -647,6 +648,7 @@ export default function HostPage() {
       setIsPeerConnected(true)
       updatePhaseFromEvent('handshake-start')
       setNotice('Secure peer channel established.', 'success')
+      runWebRtcLatencyWarmup(peer, 'host')
     })
 
     peer.on('close', () => {
@@ -1274,6 +1276,14 @@ export default function HostPage() {
         }
 
         localStreamRef.current = stream
+        const capTrack = stream.getVideoTracks?.()[0]
+        if (capTrack && 'contentHint' in capTrack) {
+          try {
+            capTrack.contentHint = 'motion'
+          } catch (_e) {
+            // ignore
+          }
+        }
         appliedQualityLevelRef.current = ''
         await applyStreamQualityProfile('good')
         const track = stream.getVideoTracks()[0]

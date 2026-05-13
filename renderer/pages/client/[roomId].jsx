@@ -4,7 +4,7 @@ import Peer from 'simple-peer'
 import { getSocket } from '../../libs/socket';
 import { useTheme } from '../../libs/theme'
 import { api } from '../../libs/http'
-import { attachRtcDiagnostics, getRtcConfig } from '../../libs/rtc'
+import { attachRtcDiagnostics, getRtcConfig, runWebRtcLatencyWarmup } from '../../libs/rtc'
 import {
   clearSessionResumeToken,
   saveSessionResumeToken,
@@ -730,6 +730,7 @@ export default function ClientPage() {
     })
 
     peer.on('stream', (stream) => {
+      runWebRtcLatencyWarmup(peer, 'client')
       // Mark stream presence immediately so frame-health monitors can run,
       // even when first decoded frame arrives a bit later.
       logVideoDebug('peer-on-stream', {
@@ -815,6 +816,7 @@ export default function ClientPage() {
 
     peer.on('connect', () => {
       logVideoDebug('peer-webrtc-connect')
+      runWebRtcLatencyWarmup(peer, 'client')
       setIsPeerConnected(true)
       sessionEngineRef.current?.setPhase(SESSION_PHASE.HANDSHAKING)
     })
