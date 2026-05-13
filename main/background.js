@@ -13,6 +13,7 @@ import {
 } from "electron";
 import serve from "electron-serve";
 import { createWindow } from "./helpers";
+import { registerHostTraySession } from "./host-tray-session";
 
 const isProd = process.env.NODE_ENV === "production";
 let preferredScreenSourceId = "";
@@ -162,6 +163,8 @@ app.setName("Remotix");
     await mainWindow.loadURL(`http://localhost:${port}/home`);
     // mainWindow.webContents.openDevTools();
   }
+
+  registerHostTraySession(mainWindow, resolveAppIconPath);
 })();
 
 app.on("window-all-closed", () => {

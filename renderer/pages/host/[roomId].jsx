@@ -142,6 +142,8 @@ export default function HostPage() {
   const [riskConfirmRequest, setRiskConfirmRequest] = useState(null)
   const [hostAuditTrail, setHostAuditTrail] = useState([])
   const [sessionEndedReason, setSessionEndedReason] = useState('')
+  /** Join-room succeeded; used with tray mode (Electron) right after entering the host session. */
+  const [hostSessionJoined, setHostSessionJoined] = useState(false)
   const [isSignalingActive, setIsSignalingActive] = useState(false)
   const [isPeerConnected, setIsPeerConnected] = useState(false)
   const [latencyMs, setLatencyMs] = useState(null)
@@ -499,6 +501,7 @@ export default function HostPage() {
     const text = toText(reason) || 'Remote session ended.'
     setSessionEndedReason(text)
     setSessionNotice(text)
+    setHostSessionJoined(false)
     setIsSharing(false)
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop())
@@ -513,6 +516,7 @@ export default function HostPage() {
   const exitSessionFlow = (reason, delayMs = 1400) => {
     if (hasTriggeredExitRef.current) return
     hasTriggeredExitRef.current = true
+    setHostSessionJoined(false)
     if (peerHealthTimeoutRef.current) {
       window.clearTimeout(peerHealthTimeoutRef.current)
       peerHealthTimeoutRef.current = null
@@ -900,13 +904,20 @@ export default function HostPage() {
         return
       }
       hasJoinedRoomRef.current = true
+      setHostSessionJoined(true)
       setIsSignalingActive(true)
       updatePhaseFromEvent('room-joined')
       console.log('[host][join-room] success', response)
       if (localStreamRef.current) {
         announceHandshakeReady()
       } else {
-        setNotice('Preparing screen share automatically. You can still change source anytime.')
+        setNotice(
+          `Preparing screen share automatically. You can still change source anytime.${
+            window.ipc?.invoke
+              ? ' The window will move to the tray when the screen picker is closed and sharing is idle.'
+              : ''
+          }`,
+        )
         ensureScreenSharingStarted().then((ok) => {
           if (!ok) openSourcePicker().catch(() => {})
         })
@@ -1092,6 +1103,7 @@ export default function HostPage() {
       socket.off('reconnect');
       socket.off('session-ended');
       socket.off('client-network-quality');
+      setHostSessionJoined(false)
     }
   }, [roomId, allowControl, router, knownPairings])
 
@@ -1350,6 +1362,38 @@ export default function HostPage() {
     }
   }, [isSharing])
 
+  /**
+   * Electron: after join-room succeeds, hide the main window to the tray as soon as blocking UI is gone
+   * (no source picker, not mid capture prep). Stays off while in session; disabled when session ends or leaving.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.ipc?.invoke) return undefined
+    const sessionEnded = Boolean(toText(sessionEndedReason))
+    const trayEligible =
+      hostSessionJoined &&
+      !sessionEnded &&
+      !isSourcePickerOpen &&
+      !isPreparingShare
+    if (!trayEligible) {
+      void window.ipc.invoke('host-session:tray-mode', { enabled: false }).catch(() => {})
+      return undefined
+    }
+    const delayMs = isSharing ? 700 : 500
+    const timeoutId = window.setTimeout(() => {
+      void window.ipc.invoke('host-session:tray-mode', { enabled: true }).catch(() => {})
+    }, delayMs)
+    return () => {
+      window.clearTimeout(timeoutId)
+      void window.ipc.invoke('host-session:tray-mode', { enabled: false }).catch(() => {})
+    }
+  }, [
+    hostSessionJoined,
+    sessionEndedReason,
+    isSourcePickerOpen,
+    isPreparingShare,
+    isSharing,
+  ])
+
   useEffect(() => {
     const handleShortcut = (event) => {
       if (event.key.toLowerCase() === 'c') {
@@ -1369,6 +1413,7 @@ export default function HostPage() {
 
   const handleDisconnect = () => {
     isManualDisconnectRef.current = true
+    setHostSessionJoined(false)
     socket.emit('leave-session', {
       roomId: toText(roomId),
       message: 'Host ended the session.',
